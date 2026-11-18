@@ -7,9 +7,11 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
-	"text/tabwriter"
 	"time"
+
+	prettytable "github.com/jedib0t/go-pretty/v6/table"
 
 	"kimi_balance_monitor/internal/config"
 	"kimi_balance_monitor/internal/kimi"
@@ -19,11 +21,21 @@ import (
 	"kimi_balance_monitor/internal/wecom"
 )
 
+var cst *time.Location
+
+func init() {
+	var err error
+	cst, err = time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		panic(err)
+	}
+}
+
 // Run 执行命令行并返回进程退出码。
 func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	configPath, remaining, err := parseGlobalArgs(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "错误：%v\n", err)
+		_, _ = fmt.Fprintf(stderr, "错误：%v\n", err)
 		return 2
 	}
 	if len(remaining) == 0 {
@@ -45,12 +57,12 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		usage(stdout)
 		return 0
 	default:
-		fmt.Fprintf(stderr, "未知命令：%s\n\n", remaining[0])
+		_, _ = fmt.Fprintf(stderr, "未知命令：%s\n\n", remaining[0])
 		usage(stderr)
 		return 2
 	}
 	if err != nil {
-		fmt.Fprintf(stderr, "错误：%v\n", err)
+		_, _ = fmt.Fprintf(stderr, "错误：%v\n", err)
 		return 1
 	}
 	return 0
@@ -192,12 +204,14 @@ func listTokens(ctx context.Context, configPath string, args []string, stdout io
 	if err != nil {
 		return err
 	}
-	writer := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(writer, "ID\t名称\t添加时间")
+	tb := prettytable.NewWriter()
+	tb.SetOutputMirror(os.Stdout)
+	tb.AppendHeader(prettytable.Row{"ID", "Name", "Registered Time"})
 	for _, token := range tokens {
-		_, _ = fmt.Fprintf(writer, "%d\t%s\t%s\n", token.ID, token.Name, token.CreatedAt.Local().Format("2006-01-02 15:04:05"))
+		tb.AppendRow(prettytable.Row{token.ID, token.Name, token.CreatedAt.In(cst).Format(time.DateTime)})
 	}
-	return writer.Flush()
+	tb.Render()
+	return nil
 }
 
 func removeToken(ctx context.Context, configPath string, args []string, stdout io.Writer) error {
