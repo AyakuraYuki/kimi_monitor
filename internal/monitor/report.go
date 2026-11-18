@@ -1,0 +1,178 @@
+package monitor
+
+import (
+	"fmt"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"kimi_balance_monitor/internal/model"
+	"kimi_balance_monitor/internal/wecom"
+)
+
+// BuildMessages 生成整体报告；超出企业微信限制时按完整令牌块拆分。
+func BuildMessages(results []model.TokenResult, checkedAt time.Time, lowThresholdMicros int64) []string {
+	header := buildHeader("## Kimi 令牌余额监控", results, checkedAt, lowThresholdMicros)
+	continuationHeader := buildHeader("## Kimi 令牌余额监控（续）", results, checkedAt, lowThresholdMicros)
+	if len(results) == 0 {
+		return []string{header + "\n暂无已配置的令牌。\n"}
+	}
+
+	blocks := make([]string, 0, len(results))
+	for _, result := range results {
+		blocks = append(blocks, buildTokenBlock(result, lowThresholdMicros))
+	}
+	messages := make([]string, 0, 1)
+	current := header
+	hasBlocks := false
+	for _, block := range blocks {
+		if hasBlocks && len(current)+len(block) > wecom.MaxMarkdownBytes {
+			messages = append(messages, strings.TrimSpace(current))
+			current = continuationHeader
+			hasBlocks = false
+		}
+		if len(current)+len(block) > wecom.MaxMarkdownBytes {
+			block = truncateUTF8(block, wecom.MaxMarkdownBytes-len(current))
+		}
+		current += block
+		hasBlocks = true
+	}
+	if hasBlocks {
+		messages = append(messages, strings.TrimSpace(current))
+	}
+	return messages
+}
+
+func buildHeader(title string, results []model.TokenResult, checkedAt time.Time, lowThresholdMicros int64) string {
+	var normal, low, exhausted, failed, replenished int
+	var totalAvailable int64
+	for _, result := range results {
+		switch result.Health(lowThresholdMicros) {
+		case model.HealthNormal:
+			normal++
+		case model.HealthLow:
+			low++
+		case model.HealthExhausted:
+			exhausted++
+		case model.HealthError:
+			failed++
+		}
+		if result.Change() == model.ChangeReplenished {
+			replenished++
+		}
+		if result.Err == nil && result.Current != nil {
+			totalAvailable += result.Current.Balance.AvailableMicros
+		}
+	}
+	return fmt.Sprintf(`%s
+> 检查时间：%s
+> 令牌：%d 个 ｜ 🟢 正常 %d ｜ 🟡 预警 %d ｜ 🔴 用尽 %d ｜ ⚠️ 异常 %d
+> 可用余额合计：**%s** ｜ 本轮补充：%d 个
+> 低余额预警线：%s（可用余额大于 0 且不超过此值时预警）
+
+`, title, checkedAt.Local().Format("2006-01-02 15:04:05 MST"), len(results), normal, low, exhausted, failed,
+		model.FormatCNY(totalAvailable), replenished, model.FormatCNY(lowThresholdMicros))
+}
+
+func buildTokenBlock(result model.TokenResult, lowThresholdMicros int64) string {
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "### #%d `%s`\n", result.TokenID, result.Name)
+	if result.Health(lowThresholdMicros) == model.HealthError {
+		builder.WriteString("<font color=\"warning\">⚠️ 查询异常</font>\n")
+		fmt.Fprintf(&builder, "> 错误：%s\n", markdownText(errorMessage(result.Err)))
+		builder.WriteString("> 本轮未生成余额快照；后续环比仍使用最近一次成功记录。\n\n")
+		return builder.String()
+	}
+
+	fmt.Fprintf(&builder, "%s　%s\n", statusText(result.Health(lowThresholdMicros)), changeText(result))
+	fmt.Fprintf(&builder, "> 可用余额：**%s**\n", model.FormatCNY(result.Current.Balance.AvailableMicros))
+	if result.Previous != nil {
+		fmt.Fprintf(&builder, "> 上次可用：%s（%s）\n",
+			model.FormatCNY(result.Previous.Balance.AvailableMicros),
+			result.Previous.CheckedAt.Local().Format("2006-01-02 15:04:05 MST"),
+		)
+	}
+	fmt.Fprintf(&builder, "> 现金：%s ｜ 代金券：%s\n\n",
+		model.FormatCNY(result.Current.Balance.CashMicros),
+		model.FormatCNY(result.Current.Balance.VoucherMicros),
+	)
+	return builder.String()
+}
+
+func statusText(health model.Health) string {
+	switch health {
+	case model.HealthNormal:
+		return `<font color="info">🟢 正常</font>`
+	case model.HealthLow:
+		return `<font color="warning">🟡 余额不足</font>`
+	case model.HealthExhausted:
+		return `<font color="warning">🔴 已用尽</font>`
+	default:
+		return `<font color="warning">⚠️ 查询异常</font>`
+	}
+}
+
+func changeText(result model.TokenResult) string {
+	switch result.Change() {
+	case model.ChangeFirst:
+		return "🆕 首次记录，暂无环比"
+	case model.ChangeUnchanged:
+		return "➖ 较上次无变化"
+	case model.ChangeReplenished:
+		delta, _ := result.DeltaMicros()
+		suffix := ""
+		if result.Current.Balance.AvailableMicros <= 0 {
+			suffix = "（已补充，但仍不可用）"
+		} else if result.Previous.Balance.AvailableMicros <= 0 {
+			suffix = "（已恢复可用）"
+		}
+		return fmt.Sprintf("📈 补充 **%s**%s", model.FormatCNY(delta), suffix)
+	case model.ChangeConsumption:
+		delta, _ := result.DeltaMicros()
+		suffix := ""
+		if result.Current.Balance.AvailableMicros <= 0 && result.Previous.Balance.AvailableMicros > 0 {
+			suffix = "（本轮耗尽）"
+		}
+		return fmt.Sprintf("📉 消耗 **%s**%s", model.FormatCNY(-delta), suffix)
+	default:
+		return "环比不可用"
+	}
+}
+
+func errorMessage(err error) string {
+	if err == nil {
+		return "未生成余额快照"
+	}
+	return err.Error()
+}
+
+func markdownText(text string) string {
+	text = strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		"`", "'",
+		"\r", " ",
+		"\n", " ",
+	).Replace(text)
+	runes := []rune(text)
+	if len(runes) > 180 {
+		return string(runes[:180]) + "……"
+	}
+	return text
+}
+
+func truncateUTF8(text string, maxBytes int) string {
+	if len(text) <= maxBytes {
+		return text
+	}
+	const suffix = "\n> ……（内容已截断）\n"
+	if maxBytes <= len(suffix) {
+		return "……"
+	}
+	end := maxBytes - len(suffix)
+	for end > 0 && !utf8.ValidString(text[:end]) {
+		end--
+	}
+	return text[:end] + suffix
+}

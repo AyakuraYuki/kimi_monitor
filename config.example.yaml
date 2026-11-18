@@ -1,0 +1,19 @@
+# 复制为 config.yaml，填入敏感配置后执行 chmod 600 config.yaml。
+database:
+  # 相对路径以本配置文件所在目录为基准。
+  path: "kimi_monitor.db"
+
+security:
+  # 使用 kimi-monitor generate-key 生成，不要与 API Key 混淆。
+  master_key: "替换为32字节主密钥的Base64或十六进制表示"
+
+kimi:
+  api_base_url: "https://api.moonshot.cn"
+
+monitor:
+  interval: "10m"
+  low_balance: 10
+  concurrency: 4
+
+wecom:
+  webhook_url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=替换为机器人密钥"
