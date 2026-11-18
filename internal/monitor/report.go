@@ -6,6 +6,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"kimi_balance_monitor/internal/config"
 	"kimi_balance_monitor/internal/model"
 	"kimi_balance_monitor/internal/wecom"
 )
@@ -44,8 +45,16 @@ func BuildMessages(results []model.TokenResult, checkedAt time.Time, lowThreshol
 }
 
 func buildHeader(title string, results []model.TokenResult, checkedAt time.Time, lowThresholdMicros int64) string {
-	var normal, low, exhausted, failed, replenished int
-	var totalAvailable int64
+	var (
+		normal         int
+		low            int
+		exhausted      int
+		failed         int
+		replenished    int
+		totalAvailable int64
+		statusParts    []string
+		availableParts []string
+	)
 	for _, result := range results {
 		switch result.Health(lowThresholdMicros) {
 		case model.HealthNormal:
@@ -64,38 +73,62 @@ func buildHeader(title string, results []model.TokenResult, checkedAt time.Time,
 			totalAvailable += result.Current.Balance.AvailableMicros
 		}
 	}
+
+	statusParts = append(statusParts, fmt.Sprintf("🟢 正常 %d", normal))
+	if low > 0 {
+		statusParts = append(statusParts, fmt.Sprintf("🟡 预警 %d", low))
+	}
+	if exhausted > 0 {
+		statusParts = append(statusParts, fmt.Sprintf("🔴 用尽 %d", exhausted))
+	}
+	if failed > 0 {
+		statusParts = append(statusParts, fmt.Sprintf("⚠️ 异常 %d", failed))
+	}
+
+	availableParts = append(availableParts, fmt.Sprintf("可用余额合计：**%s**", model.FormatCNY(totalAvailable)))
+	if replenished > 0 {
+		availableParts = append(availableParts, fmt.Sprintf("本轮补充：%d 个", replenished))
+	}
+
 	return fmt.Sprintf(`%s
 > 检查时间：%s
-> 令牌：%d 个 ｜ 🟢 正常 %d ｜ 🟡 预警 %d ｜ 🔴 用尽 %d ｜ ⚠️ 异常 %d
-> 可用余额合计：**%s** ｜ 本轮补充：%d 个
-> 低余额预警线：%s（可用余额大于 0 且不超过此值时预警）
+> 令牌：%d 个 ｜ %s
+> %s
+> 低余额预警线：%s
 
-`, title, checkedAt.Local().Format("2006-01-02 15:04:05 MST"), len(results), normal, low, exhausted, failed,
-		model.FormatCNY(totalAvailable), replenished, model.FormatCNY(lowThresholdMicros))
+`,
+		title,
+		checkedAt.In(config.CST()).Format(time.DateTime),
+		len(results),
+		strings.Join(statusParts, " | "),
+		strings.Join(availableParts, " | "),
+		model.FormatCNY(lowThresholdMicros))
 }
 
 func buildTokenBlock(result model.TokenResult, lowThresholdMicros int64) string {
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "### #%d `%s`\n", result.TokenID, result.Name)
+	_, _ = fmt.Fprintf(&builder, "### #%d `%s`\n", result.TokenID, result.Name)
 	if result.Health(lowThresholdMicros) == model.HealthError {
 		builder.WriteString("<font color=\"warning\">⚠️ 查询异常</font>\n")
-		fmt.Fprintf(&builder, "> 错误：%s\n", markdownText(errorMessage(result.Err)))
+		_, _ = fmt.Fprintf(&builder, "> 错误：%s\n", markdownText(errorMessage(result.Err)))
 		builder.WriteString("> 本轮未生成余额快照；后续环比仍使用最近一次成功记录。\n\n")
 		return builder.String()
 	}
 
-	fmt.Fprintf(&builder, "%s　%s\n", statusText(result.Health(lowThresholdMicros)), changeText(result))
-	fmt.Fprintf(&builder, "> 可用余额：**%s**\n", model.FormatCNY(result.Current.Balance.AvailableMicros))
+	_, _ = fmt.Fprintf(&builder, "%s　%s\n", statusText(result.Health(lowThresholdMicros)), changeText(result))
+	_, _ = fmt.Fprintf(&builder, "> 可用余额：**%s**\n", model.FormatCNY(result.Current.Balance.AvailableMicros))
 	if result.Previous != nil {
-		fmt.Fprintf(&builder, "> 上次可用：%s（%s）\n",
+		_, _ = fmt.Fprintf(&builder, "> 上次可用：%s（%s）\n",
 			model.FormatCNY(result.Previous.Balance.AvailableMicros),
-			result.Previous.CheckedAt.Local().Format("2006-01-02 15:04:05 MST"),
-		)
+			result.Previous.CheckedAt.In(config.CST()).Format(time.DateTime))
 	}
-	fmt.Fprintf(&builder, "> 现金：%s ｜ 代金券：%s\n\n",
-		model.FormatCNY(result.Current.Balance.CashMicros),
-		model.FormatCNY(result.Current.Balance.VoucherMicros),
-	)
+	if result.Current.Balance.VoucherMicros > 0 {
+		_, _ = fmt.Fprintf(&builder, "> 现金：%s | 代金券：%s\n\n",
+			model.FormatCNY(result.Current.Balance.CashMicros),
+			model.FormatCNY(result.Current.Balance.VoucherMicros))
+	} else {
+		_, _ = fmt.Fprintf(&builder, "> 现金：%s\n\n", model.FormatCNY(result.Current.Balance.CashMicros))
+	}
 	return builder.String()
 }
 

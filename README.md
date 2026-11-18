@@ -88,7 +88,7 @@ YAML 解析会拒绝未知字段。配置文件可能同时包含主密钥和 we
 
 ```bash
 printf '%s\n' 'sk-实际令牌' | ./bin/kimi-monitor add --stdin
-# 已添加令牌：ID=1，名称=sk-abcd****5678
+# 输出包含 token_id 和打码后 token_name 字段的 JSON 状态日志
 ```
 
 也支持直接参数，但不推荐：
@@ -128,6 +128,18 @@ printf '%s\n' 'sk-实际令牌' | ./bin/kimi-monitor add --stdin
 ```
 
 查询间隔、预警线和并发数均在 YAML 的 `monitor` 节点中配置。没有配置令牌时跳过查询和推送。单个令牌失败不会中断其他令牌，错误会写入数据库并体现在整体报告中；`run --once` 只在存储或推送失败等整体错误时返回非零退出码。
+
+### 日志格式
+
+状态与运行日志使用 zerolog 输出为单行 JSON，并包含 `level`、`time`、`message` 字段。令牌数量、查询异常数、消息数和打码令牌名等数据使用独立的结构化字段，不再拼接到消息文本中。例如，单轮完成日志包含：
+
+```json
+{"level":"info","token_count":2,"failure_count":0,"message_count":1,"time":"2026-11-18T01:00:00+08:00","message":"本轮完成"}
+```
+
+- 整个进程只在入口处创建一个 logger，CLI 与持续监控服务共同使用。
+- 所有状态、错误和持续运行日志统一写入标准输出，不再主动写入标准错误；Supervisor 配置仍会合并标准错误，以捕获 Go 运行时等异常输出。
+- `help`、`generate-key` 的密钥以及 `list` 的表格属于功能性输出，不使用日志格式。
 
 ## 服务运行期间管理令牌
 

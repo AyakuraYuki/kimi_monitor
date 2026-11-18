@@ -15,6 +15,18 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var cst *time.Location
+
+func init() {
+	var err error
+	cst, err = time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		panic(err)
+	}
+}
+
+func CST() *time.Location { return cst }
+
 const DefaultPath = "config.yaml"
 
 // Duration 支持将 YAML 中的 10m、30s 等字符串解析为时间间隔。

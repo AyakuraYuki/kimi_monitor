@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"kimi_balance_monitor/internal/model"
 	"kimi_balance_monitor/internal/secrets"
 )
@@ -107,7 +109,7 @@ func (s *Service) checkOne(ctx context.Context, token model.Token, checkedAt tim
 // Run 按固定间隔执行查询和整体推送；启动后立即执行第一轮。
 func Run(ctx context.Context, service *Service, notifier interface {
 	SendMarkdown(ctx context.Context, content string) error
-}, interval time.Duration, lowThresholdMicros int64, logf func(format string, args ...any)) error {
+}, interval time.Duration, lowThresholdMicros int64, logger *zerolog.Logger) error {
 	if interval <= 0 {
 		return fmt.Errorf("查询间隔必须大于 0")
 	}
@@ -117,7 +119,7 @@ func Run(ctx context.Context, service *Service, notifier interface {
 			return err
 		}
 		if len(results) == 0 {
-			logf("没有已配置的令牌，本轮跳过推送")
+			logger.Info().Msg("没有已配置的令牌，本轮跳过推送")
 			return nil
 		}
 		messages := BuildMessages(results, time.Now(), lowThresholdMicros)
@@ -132,12 +134,16 @@ func Run(ctx context.Context, service *Service, notifier interface {
 				failures++
 			}
 		}
-		logf("本轮完成：%d 个令牌，%d 个查询异常，%d 条企业微信消息", len(results), failures, len(messages))
+		logger.Info().
+			Int("token_count", len(results)).
+			Int("failure_count", failures).
+			Int("message_count", len(messages)).
+			Msg("本轮完成")
 		return nil
 	}
 
 	if err := runRound(); err != nil {
-		logf("本轮监控失败: %v", err)
+		logger.Error().Err(err).Msg("本轮监控失败")
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -147,7 +153,7 @@ func Run(ctx context.Context, service *Service, notifier interface {
 			return nil
 		case <-ticker.C:
 			if err := runRound(); err != nil {
-				logf("本轮监控失败: %v", err)
+				logger.Error().Err(err).Msg("本轮监控失败")
 			}
 		}
 	}

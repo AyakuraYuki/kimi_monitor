@@ -2,16 +2,16 @@ package cli
 
 import (
 	"context"
-	"flag"
+	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
 	prettytable "github.com/jedib0t/go-pretty/v6/table"
+	"github.com/rs/zerolog"
+	"github.com/spf13/cobra"
 
 	"kimi_balance_monitor/internal/config"
 	"kimi_balance_monitor/internal/kimi"
@@ -21,89 +21,28 @@ import (
 	"kimi_balance_monitor/internal/wecom"
 )
 
-var cst *time.Location
-
-func init() {
-	var err error
-	cst, err = time.LoadLocation("Asia/Shanghai")
-	if err != nil {
-		panic(err)
-	}
-}
+var errCommandRequired = errors.New("需要指定要执行的命令")
 
 // Run 执行命令行并返回进程退出码。
-func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	configPath, remaining, err := parseGlobalArgs(args)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "错误：%v\n", err)
-		return 2
-	}
-	if len(remaining) == 0 {
-		usage(stderr)
-		return 2
-	}
-	switch remaining[0] {
-	case "generate-key":
-		err = generateKey(remaining[1:], stdout)
-	case "add":
-		err = addToken(ctx, configPath, remaining[1:], stdin, stdout)
-	case "list":
-		err = listTokens(ctx, configPath, remaining[1:], stdout)
-	case "remove":
-		err = removeToken(ctx, configPath, remaining[1:], stdout)
-	case "run":
-		err = runMonitor(ctx, configPath, remaining[1:], stdout, stderr)
-	case "help", "-h", "--help":
-		usage(stdout)
-		return 0
-	default:
-		_, _ = fmt.Fprintf(stderr, "未知命令：%s\n\n", remaining[0])
-		usage(stderr)
-		return 2
-	}
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "错误：%v\n", err)
+func Run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, logger *zerolog.Logger) int {
+	root := newRootCommand(stdin, stdout, logger)
+	root.SetArgs(args)
+	if err := root.ExecuteContext(ctx); err != nil {
+		if errors.Is(err, errCommandRequired) {
+			return 2
+		}
+		logger.Error().Err(err).Msg("命令执行失败")
 		return 1
 	}
 	return 0
 }
 
-func parseGlobalArgs(args []string) (string, []string, error) {
+func newRootCommand(stdin io.Reader, stdout io.Writer, logger *zerolog.Logger) *cobra.Command {
 	configPath := config.DefaultPath
-	for len(args) > 0 {
-		switch {
-		case args[0] == "--config" || args[0] == "-c":
-			if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
-				return "", nil, fmt.Errorf("%s 后需要指定 YAML 配置文件", args[0])
-			}
-			configPath = args[1]
-			args = args[2:]
-		case strings.HasPrefix(args[0], "--config="):
-			configPath = strings.TrimPrefix(args[0], "--config=")
-			if strings.TrimSpace(configPath) == "" {
-				return "", nil, fmt.Errorf("--config 不能为空")
-			}
-			args = args[1:]
-		default:
-			return configPath, args, nil
-		}
-	}
-	return configPath, args, nil
-}
-
-func usage(writer io.Writer) {
-	fmt.Fprint(writer, `Kimi 令牌余额监控
-
-用法：
-  kimi-monitor [--config config.yaml] generate-key
-  kimi-monitor [--config config.yaml] add --stdin
-  kimi-monitor [--config config.yaml] add <sk-...>
-  kimi-monitor [--config config.yaml] list
-  kimi-monitor [--config config.yaml] remove <ID|打码名称>
-  kimi-monitor [--config config.yaml] run [--once]
-
-全局参数：
-  -c, --config <路径>  YAML 配置文件，默认 config.yaml
+	root := &cobra.Command{
+		Use:   "kimi-monitor",
+		Short: "Kimi 令牌余额监控",
+		Long: `Kimi 令牌余额监控
 
 配置项：
   security.master_key   32 字节主密钥的 Base64 或十六进制表示
@@ -115,14 +54,107 @@ func usage(writer io.Writer) {
   wecom.webhook_url     企业微信群机器人 webhook 地址
 
 推荐使用 add --stdin，避免明文令牌进入 shell 历史。
-配置文件可能包含敏感信息，权限必须为 0600。
-`)
+配置文件可能包含敏感信息，权限必须为 0600。`,
+		Args:          cobra.NoArgs,
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := cmd.Help(); err != nil {
+				return err
+			}
+			return errCommandRequired
+		},
+	}
+	root.SetIn(stdin)
+	root.SetOut(stdout)
+	root.SetErr(stdout)
+	root.CompletionOptions.DisableDefaultCmd = true
+	root.PersistentPreRunE = func(_ *cobra.Command, _ []string) error {
+		if strings.TrimSpace(configPath) == "" {
+			return fmt.Errorf("--config 不能为空")
+		}
+		return nil
+	}
+	root.PersistentFlags().StringVarP(&configPath, "config", "c", config.DefaultPath, "YAML 配置文件")
+	root.AddCommand(
+		newGenerateKeyCommand(),
+		newAddCommand(&configPath, logger),
+		newListCommand(&configPath),
+		newRemoveCommand(&configPath, logger),
+		newRunCommand(&configPath, logger),
+	)
+	return root
 }
 
-func generateKey(args []string, stdout io.Writer) error {
-	if len(args) != 0 {
-		return fmt.Errorf("generate-key 不接受参数")
+func newGenerateKeyCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "generate-key",
+		Short: "生成 32 字节主密钥",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return generateKey(cmd.OutOrStdout())
+		},
 	}
+}
+
+func newAddCommand(configPath *string, logger *zerolog.Logger) *cobra.Command {
+	var fromStdin bool
+	command := &cobra.Command{
+		Use:   "add <sk-...>",
+		Short: "添加 Kimi 令牌",
+		Example: `  kimi-monitor add --stdin
+  kimi-monitor add <sk-...>`,
+		Args: func(_ *cobra.Command, args []string) error {
+			if (fromStdin && len(args) != 0) || (!fromStdin && len(args) != 1) {
+				return fmt.Errorf("用法：kimi-monitor add --stdin，或 kimi-monitor add <sk-...>")
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return addToken(cmd.Context(), *configPath, args, fromStdin, cmd.InOrStdin(), logger)
+		},
+	}
+	command.Flags().BoolVar(&fromStdin, "stdin", false, "从标准输入读取令牌")
+	return command
+}
+
+func newListCommand(configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "列出已保存的令牌",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return listTokens(cmd.Context(), *configPath, cmd.OutOrStdout())
+		},
+	}
+}
+
+func newRemoveCommand(configPath *string, logger *zerolog.Logger) *cobra.Command {
+	return &cobra.Command{
+		Use:   "remove <ID|打码名称>",
+		Short: "删除令牌及其余额历史",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return removeToken(cmd.Context(), *configPath, args[0], logger)
+		},
+	}
+}
+
+func newRunCommand(configPath *string, logger *zerolog.Logger) *cobra.Command {
+	var once bool
+	command := &cobra.Command{
+		Use:   "run",
+		Short: "查询令牌余额并推送企业微信报告",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runMonitor(cmd.Context(), *configPath, once, logger)
+		},
+	}
+	command.Flags().BoolVar(&once, "once", false, "只执行一轮")
+	return command
+}
+
+func generateKey(stdout io.Writer) error {
 	key, err := secrets.GenerateKey()
 	if err != nil {
 		return err
@@ -131,19 +163,9 @@ func generateKey(args []string, stdout io.Writer) error {
 	return err
 }
 
-func addToken(ctx context.Context, configPath string, args []string, stdin io.Reader, stdout io.Writer) error {
-	flags := flag.NewFlagSet("add", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	fromStdin := flags.Bool("stdin", false, "从标准输入读取令牌")
-	if err := flags.Parse(args); err != nil {
-		return fmt.Errorf("解析 add 参数失败: %w", err)
-	}
-	if (*fromStdin && flags.NArg() != 0) || (!*fromStdin && flags.NArg() != 1) {
-		return fmt.Errorf("用法：kimi-monitor add --stdin，或 kimi-monitor add <sk-...>")
-	}
-
+func addToken(ctx context.Context, configPath string, args []string, fromStdin bool, stdin io.Reader, logger *zerolog.Logger) error {
 	var token string
-	if *fromStdin {
+	if fromStdin {
 		data, err := io.ReadAll(io.LimitReader(stdin, 4097))
 		if err != nil {
 			return fmt.Errorf("从标准输入读取令牌失败: %w", err)
@@ -153,7 +175,7 @@ func addToken(ctx context.Context, configPath string, args []string, stdin io.Re
 		}
 		token = strings.TrimSpace(string(data))
 	} else {
-		token = strings.TrimSpace(flags.Arg(0))
+		token = strings.TrimSpace(args[0])
 	}
 	if token == "" {
 		return fmt.Errorf("令牌不能为空")
@@ -183,14 +205,14 @@ func addToken(ctx context.Context, configPath string, args []string, stdin io.Re
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "已添加令牌：ID=%d，名称=%s\n", tokenRecord.ID, tokenRecord.Name)
+	logger.Info().
+		Int64("token_id", tokenRecord.ID).
+		Str("token_name", tokenRecord.Name).
+		Msg("已添加令牌")
 	return nil
 }
 
-func listTokens(ctx context.Context, configPath string, args []string, stdout io.Writer) error {
-	if len(args) != 0 {
-		return fmt.Errorf("list 不接受参数")
-	}
+func listTokens(ctx context.Context, configPath string, stdout io.Writer) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -205,19 +227,16 @@ func listTokens(ctx context.Context, configPath string, args []string, stdout io
 		return err
 	}
 	tb := prettytable.NewWriter()
-	tb.SetOutputMirror(os.Stdout)
+	tb.SetOutputMirror(stdout)
 	tb.AppendHeader(prettytable.Row{"ID", "Name", "Registered Time"})
 	for _, token := range tokens {
-		tb.AppendRow(prettytable.Row{token.ID, token.Name, token.CreatedAt.In(cst).Format(time.DateTime)})
+		tb.AppendRow(prettytable.Row{token.ID, token.Name, token.CreatedAt.In(config.CST()).Format(time.DateTime)})
 	}
 	tb.Render()
 	return nil
 }
 
-func removeToken(ctx context.Context, configPath string, args []string, stdout io.Writer) error {
-	if len(args) != 1 {
-		return fmt.Errorf("用法：kimi-monitor remove <ID|打码名称>")
-	}
+func removeToken(ctx context.Context, configPath string, identifier string, logger *zerolog.Logger) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -227,25 +246,15 @@ func removeToken(ctx context.Context, configPath string, args []string, stdout i
 		return err
 	}
 	defer database.Close()
-	name, err := database.RemoveToken(ctx, args[0])
+	name, err := database.RemoveToken(ctx, identifier)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "已删除令牌：%s\n", name)
+	logger.Info().Str("token_name", name).Msg("已删除令牌")
 	return nil
 }
 
-func runMonitor(ctx context.Context, configPath string, args []string, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("run", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	once := flags.Bool("once", false, "只执行一轮")
-	if err := flags.Parse(args); err != nil {
-		return fmt.Errorf("解析 run 参数失败: %w", err)
-	}
-	if flags.NArg() != 0 {
-		return fmt.Errorf("run 不接受位置参数")
-	}
-
+func runMonitor(ctx context.Context, configPath string, once bool, logger *zerolog.Logger) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -275,13 +284,13 @@ func runMonitor(ctx context.Context, configPath string, args []string, stdout, s
 		MaxParallel: cfg.Monitor.Concurrency,
 	}
 
-	if *once {
+	if once {
 		results, err := service.CheckAll(ctx)
 		if err != nil {
 			return err
 		}
 		if len(results) == 0 {
-			fmt.Fprintln(stdout, "没有已配置的令牌，已跳过查询和推送")
+			logger.Info().Msg("没有已配置的令牌，已跳过查询和推送")
 			return nil
 		}
 		messages := monitor.BuildMessages(results, time.Now(), cfg.LowBalanceMicros())
@@ -296,12 +305,15 @@ func runMonitor(ctx context.Context, configPath string, args []string, stdout, s
 				failures++
 			}
 		}
-		fmt.Fprintf(stdout, "本轮完成：%d 个令牌，%d 个查询异常，%d 条企业微信消息\n", len(results), failures, len(messages))
+		logger.Info().
+			Int("token_count", len(results)).
+			Int("failure_count", failures).
+			Int("message_count", len(messages)).
+			Msg("本轮完成")
 		return nil
 	}
 
-	logger := log.New(stderr, "", log.LstdFlags)
-	return monitor.Run(ctx, service, notifier, cfg.Monitor.Interval.Duration, cfg.LowBalanceMicros(), logger.Printf)
+	return monitor.Run(ctx, service, notifier, cfg.Monitor.Interval.Duration, cfg.LowBalanceMicros(), logger)
 }
 
 func cipherFromConfig(cfg config.Config) (*secrets.Cipher, error) {
