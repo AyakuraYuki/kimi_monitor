@@ -4,7 +4,7 @@
 
 ## 功能
 
-- 命令行添加、查看、删除令牌。
+- 命令行添加、查看、设置备注、删除令牌。
 - 令牌使用 AES-256-GCM 加密后保存；去重使用独立密钥派生的 HMAC-SHA256 摘要。
 - 数据库唯一约束阻止重复添加，管理名统一为 `sk-abcd****0123`。
 - 启动后立即查询，之后默认每 10 分钟进行一轮全量查询。
@@ -16,7 +16,7 @@
 
 ## 构建
 
-需要 Go 1.27 或更新版本。SQLite 使用纯 Go 驱动，不依赖 CGO。
+需要 Go 1.27 或更新版本。数据库操作使用 GORM，SQLite 使用纯 Go 驱动，不依赖 CGO。
 
 ```bash
 go build -o bin/kimi-monitor ./cmd/kimi-monitor
@@ -97,15 +97,20 @@ printf '%s\n' 'sk-实际令牌' | ./bin/kimi-monitor add --stdin
 ./bin/kimi-monitor add 'sk-实际令牌'
 ```
 
-查看和删除：
+查看、设置备注和删除：
 
 ```bash
 ./bin/kimi-monitor list
+./bin/kimi-monitor remark 1 '生产环境主账号'
+./bin/kimi-monitor remark 'sk-abcd****5678' '备用账号'
+./bin/kimi-monitor remark 1 ''  # 清除备注
 ./bin/kimi-monitor remove 1
 ./bin/kimi-monitor remove 'sk-abcd****5678'
 ```
 
-不同令牌可能出现相同的首尾打码名称，因此名称碰撞时仍允许添加，但按名称删除会要求改用数字 ID。删除令牌会级联删除其余额历史。
+备注保存在 `tokens.remark` 列；`list` 和企业微信报告都会展示非空备注。打开旧版本数据库时，GORM 会自动执行幂等迁移并补充该列，无需手工修改表结构。
+
+不同令牌可能出现相同的首尾打码名称，因此名称碰撞时仍允许添加，但按名称设置备注或删除会要求改用数字 ID。删除令牌会级联删除其余额历史。
 
 ## 运行
 
@@ -205,6 +210,7 @@ YAML 配置本身的修改不会自动热加载，修改后需要重启服务；
 > 低余额预警线：¥10.000000
 
 ### #1 `sk-abcd****5678`
+> 备注：生产环境主账号
 <font color="info">🟢 正常</font>　📉 消耗 **¥0.100000**
 > 可用余额：**¥49.588940**
 > 上次可用：¥49.688940（2026-11-18 00:50:00 CST）
@@ -319,7 +325,7 @@ sudo -u kimi-monitor /opt/kimi-monitor/bin/kimi-monitor \
 
 ### `tokens`
 
-保存数字 ID、打码名称、HMAC 去重摘要、AES-GCM 密文和添加时间。`token_hash` 有唯一索引；打码名称不唯一，避免名称碰撞造成误判。
+保存数字 ID、打码名称、备注、HMAC 去重摘要、AES-GCM 密文和添加时间。`token_hash` 有唯一索引；打码名称不唯一，避免名称碰撞造成误判。
 
 ### `balance_records`
 

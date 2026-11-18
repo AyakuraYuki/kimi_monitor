@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -12,49 +11,53 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"kimi_balance_monitor/internal/model"
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 
-	_ "modernc.org/sqlite"
+	"kimi_balance_monitor/internal/model"
 )
 
 var (
 	ErrDuplicateToken = errors.New("令牌已存在，不可重复添加")
 	ErrTokenNotFound  = errors.New("令牌不存在")
-	ErrAmbiguousToken = errors.New("打码名称对应多个令牌，请使用 ID 删除")
+	ErrAmbiguousToken = errors.New("打码名称对应多个令牌，请使用 ID 操作")
 )
 
-const schema = `
-CREATE TABLE IF NOT EXISTS tokens (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    name            TEXT NOT NULL,
-    token_hash      BLOB NOT NULL UNIQUE,
-    token_ciphertext BLOB NOT NULL,
-    created_at      INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS balance_records (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    token_id          INTEGER NOT NULL REFERENCES tokens(id) ON DELETE CASCADE,
-    checked_at        INTEGER NOT NULL,
-    available_micros  INTEGER,
-    voucher_micros    INTEGER,
-    cash_micros       INTEGER,
-    error             TEXT NOT NULL DEFAULT ''
-);
-
-CREATE INDEX IF NOT EXISTS idx_balance_records_latest_success
-    ON balance_records(token_id, id DESC)
-    WHERE ERROR = '';
-
-PRAGMA user_version = 1;
-`
-
-// Store 持久化令牌密文和所有查询记录。
-type Store struct {
-	db *sql.DB
+type tokenRecord struct {
+	ID              int64  `gorm:"primaryKey;autoIncrement"`
+	Name            string `gorm:"not null"`
+	TokenHash       []byte `gorm:"not null;uniqueIndex"`
+	TokenCiphertext []byte `gorm:"not null"`
+	Remark          string `gorm:"not null;default:''"`
+	CreatedAt       int64  `gorm:"not null"`
 }
 
-// Open 打开数据库并执行幂等建表。
+func (tokenRecord) TableName() string {
+	return "tokens"
+}
+
+type balanceRecord struct {
+	ID              int64 `gorm:"primaryKey;autoIncrement;index:idx_balance_records_latest_success,where:error = '',sort:desc,priority:2"`
+	TokenID         int64 `gorm:"not null;index:idx_balance_records_latest_success,priority:1"`
+	CheckedAt       int64 `gorm:"not null"`
+	AvailableMicros *int64
+	VoucherMicros   *int64
+	CashMicros      *int64
+	Error           string       `gorm:"not null;default:''"`
+	Token           *tokenRecord `gorm:"foreignKey:TokenID;constraint:OnDelete:CASCADE"`
+}
+
+func (balanceRecord) TableName() string {
+	return "balance_records"
+}
+
+// Store 使用 GORM 持久化令牌密文和所有查询记录。
+type Store struct {
+	db *gorm.DB
+}
+
+// Open 打开数据库并执行幂等迁移，旧数据库会自动补充新增列。
 func Open(ctx context.Context, path string) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("数据库路径不能为空")
@@ -77,193 +80,204 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		}
 	}
 
-	db, err := sql.Open("sqlite", path)
+	gormDB, err := gorm.Open(sqlite.Open(path), &gorm.Config{
+		Logger:         gormlogger.Default.LogMode(gormlogger.Silent),
+		TranslateError: true,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("打开 SQLite 失败: %w", err)
 	}
-	// 单连接确保 PRAGMA 在每次查询中一致，并减少 SQLite 写锁竞争。
-	db.SetMaxOpenConns(1)
-	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("连接 SQLite 失败: %w", err)
+	sqlDB, err := gormDB.DB()
+	if err != nil {
+		return nil, fmt.Errorf("获取 SQLite 连接失败: %w", err)
 	}
+	closeOnError := func(err error) (*Store, error) {
+		_ = sqlDB.Close()
+		return nil, err
+	}
+	// 单连接确保 PRAGMA 在每次查询中一致，并减少 SQLite 写锁竞争。
+	sqlDB.SetMaxOpenConns(1)
+	if err := sqlDB.PingContext(ctx); err != nil {
+		return closeOnError(fmt.Errorf("连接 SQLite 失败: %w", err))
+	}
+	db := gormDB.WithContext(ctx)
 	for _, pragma := range []string{
 		"PRAGMA busy_timeout = 5000",
 		"PRAGMA foreign_keys = ON",
 		"PRAGMA journal_mode = WAL",
 	} {
-		if _, err := db.ExecContext(ctx, pragma); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("初始化 SQLite 参数失败: %w", err)
+		if err := db.Exec(pragma).Error; err != nil {
+			return closeOnError(fmt.Errorf("初始化 SQLite 参数失败: %w", err))
 		}
 	}
-	if _, err := db.ExecContext(ctx, schema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("初始化数据库结构失败: %w", err)
+	if err := db.AutoMigrate(&tokenRecord{}, &balanceRecord{}); err != nil {
+		return closeOnError(fmt.Errorf("迁移数据库结构失败: %w", err))
 	}
-	return &Store{db: db}, nil
+	if err := db.Exec("PRAGMA user_version = 2").Error; err != nil {
+		return closeOnError(fmt.Errorf("更新数据库版本失败: %w", err))
+	}
+	return &Store{db: gormDB}, nil
 }
 
 func (s *Store) Close() error {
-	return s.db.Close()
+	sqlDB, err := s.db.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
 }
 
 // AddToken 添加令牌；token_hash 的唯一索引保证不会重复。
 func (s *Store) AddToken(ctx context.Context, name string, digest, ciphertext []byte, now time.Time) (model.Token, error) {
-	var existingID int64
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM tokens WHERE token_hash = ?`, digest).Scan(&existingID)
+	db := s.db.WithContext(ctx)
+	var existing tokenRecord
+	err := db.Select("id").Where("token_hash = ?", digest).Take(&existing).Error
 	if err == nil {
 		return model.Token{}, ErrDuplicateToken
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return model.Token{}, fmt.Errorf("检查令牌是否重复失败: %w", err)
 	}
 
-	result, err := s.db.ExecContext(ctx,
-		`INSERT INTO tokens(name, token_hash, token_ciphertext, created_at) VALUES (?, ?, ?, ?)`,
-		name, digest, ciphertext, now.UTC().UnixMilli(),
-	)
-	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+	record := tokenRecord{
+		Name:            name,
+		TokenHash:       digest,
+		TokenCiphertext: ciphertext,
+		CreatedAt:       now.UTC().UnixMilli(),
+	}
+	if err := db.Create(&record).Error; err != nil {
+		if errors.Is(err, gorm.ErrDuplicatedKey) || strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return model.Token{}, ErrDuplicateToken
 		}
 		return model.Token{}, fmt.Errorf("保存令牌失败: %w", err)
 	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return model.Token{}, fmt.Errorf("读取令牌 ID 失败: %w", err)
-	}
-	return model.Token{ID: id, Name: name, Ciphertext: ciphertext, CreatedAt: now}, nil
+	return tokenFromRecord(record), nil
 }
 
 // ListTokens 返回全部令牌，顺序固定便于生成报告。
 func (s *Store) ListTokens(ctx context.Context) ([]model.Token, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, token_ciphertext, created_at FROM tokens ORDER BY id`,
-	)
-	if err != nil {
+	var records []tokenRecord
+	if err := s.db.WithContext(ctx).Order("id").Find(&records).Error; err != nil {
 		return nil, fmt.Errorf("读取令牌列表失败: %w", err)
 	}
-	defer rows.Close()
-
-	var tokens []model.Token
-	for rows.Next() {
-		var token model.Token
-		var createdAt int64
-		if err := rows.Scan(&token.ID, &token.Name, &token.Ciphertext, &createdAt); err != nil {
-			return nil, fmt.Errorf("解析令牌记录失败: %w", err)
-		}
-		token.CreatedAt = time.UnixMilli(createdAt)
-		tokens = append(tokens, token)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("遍历令牌记录失败: %w", err)
+	tokens := make([]model.Token, 0, len(records))
+	for _, record := range records {
+		tokens = append(tokens, tokenFromRecord(record))
 	}
 	return tokens, nil
 }
 
 // RemoveToken 支持使用数字 ID 或完整打码名称删除令牌。
 func (s *Store) RemoveToken(ctx context.Context, selector string) (string, error) {
-	selector = strings.TrimSpace(selector)
-	var id int64
-	var name string
-	if parsed, err := strconv.ParseInt(selector, 10, 64); err == nil && parsed > 0 {
-		id = parsed
-		if err := s.db.QueryRowContext(ctx, `SELECT name FROM tokens WHERE id = ?`, id).Scan(&name); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return "", ErrTokenNotFound
-			}
-			return "", fmt.Errorf("查找令牌失败: %w", err)
-		}
-	} else {
-		rows, err := s.db.QueryContext(ctx, `SELECT id, name FROM tokens WHERE name = ? LIMIT 2`, selector)
-		if err != nil {
-			return "", fmt.Errorf("查找令牌失败: %w", err)
-		}
-		var matches []model.Token
-		for rows.Next() {
-			var token model.Token
-			if err := rows.Scan(&token.ID, &token.Name); err != nil {
-				_ = rows.Close()
-				return "", fmt.Errorf("解析令牌记录失败: %w", err)
-			}
-			matches = append(matches, token)
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return "", fmt.Errorf("遍历令牌记录失败: %w", err)
-		}
-		_ = rows.Close()
-		if len(matches) == 0 {
-			return "", ErrTokenNotFound
-		}
-		if len(matches) > 1 {
-			return "", ErrAmbiguousToken
-		}
-		id, name = matches[0].ID, matches[0].Name
-	}
-
-	result, err := s.db.ExecContext(ctx, `DELETE FROM tokens WHERE id = ?`, id)
+	record, err := s.findToken(ctx, selector)
 	if err != nil {
-		return "", fmt.Errorf("删除令牌失败: %w", err)
+		return "", err
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return "", fmt.Errorf("确认删除结果失败: %w", err)
+	result := s.db.WithContext(ctx).Delete(&tokenRecord{}, record.ID)
+	if result.Error != nil {
+		return "", fmt.Errorf("删除令牌失败: %w", result.Error)
 	}
-	if affected == 0 {
+	if result.RowsAffected == 0 {
 		return "", ErrTokenNotFound
 	}
-	return name, nil
+	return record.Name, nil
+}
+
+// SetTokenRemark 设置令牌备注；空白备注会清除已有备注。
+func (s *Store) SetTokenRemark(ctx context.Context, selector, remark string) (model.Token, error) {
+	record, err := s.findToken(ctx, selector)
+	if err != nil {
+		return model.Token{}, err
+	}
+	remark = strings.TrimSpace(remark)
+	result := s.db.WithContext(ctx).Model(&tokenRecord{}).Where("id = ?", record.ID).Update("remark", remark)
+	if result.Error != nil {
+		return model.Token{}, fmt.Errorf("保存令牌备注失败: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return model.Token{}, ErrTokenNotFound
+	}
+	record.Remark = remark
+	return tokenFromRecord(*record), nil
+}
+
+func (s *Store) findToken(ctx context.Context, selector string) (*tokenRecord, error) {
+	selector = strings.TrimSpace(selector)
+	db := s.db.WithContext(ctx)
+	if id, err := strconv.ParseInt(selector, 10, 64); err == nil && id > 0 {
+		var record tokenRecord
+		if err := db.Where("id = ?", id).Take(&record).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, ErrTokenNotFound
+			}
+			return nil, fmt.Errorf("查找令牌失败: %w", err)
+		}
+		return &record, nil
+	}
+
+	var records []tokenRecord
+	if err := db.Where("name = ?", selector).Order("id").Limit(2).Find(&records).Error; err != nil {
+		return nil, fmt.Errorf("查找令牌失败: %w", err)
+	}
+	if len(records) == 0 {
+		return nil, ErrTokenNotFound
+	}
+	if len(records) > 1 {
+		return nil, ErrAmbiguousToken
+	}
+	return &records[0], nil
 }
 
 // RecordSuccess 在同一事务中读取上一次成功快照并保存本轮结果。
 func (s *Store) RecordSuccess(ctx context.Context, tokenID int64, checkedAt time.Time, balance model.Balance) (*model.Snapshot, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("开启余额写入事务失败: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	previous, err := latestSuccess(ctx, tx, tokenID)
+	var previous *model.Snapshot
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var err error
+		previous, err = latestSuccess(tx, tokenID)
+		if err != nil {
+			return err
+		}
+		record := balanceRecord{
+			TokenID:         tokenID,
+			CheckedAt:       checkedAt.UTC().UnixMilli(),
+			AvailableMicros: &balance.AvailableMicros,
+			VoucherMicros:   &balance.VoucherMicros,
+			CashMicros:      &balance.CashMicros,
+			Error:           "",
+		}
+		if err := tx.Create(&record).Error; err != nil {
+			return fmt.Errorf("保存余额快照失败: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO balance_records(
-			token_id, checked_at, available_micros, voucher_micros, cash_micros, error
-		) VALUES (?, ?, ?, ?, ?, '')`,
-		tokenID, checkedAt.UTC().UnixMilli(), balance.AvailableMicros, balance.VoucherMicros, balance.CashMicros,
-	); err != nil {
-		return nil, fmt.Errorf("保存余额快照失败: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("提交余额写入事务失败: %w", err)
 	}
 	return previous, nil
 }
 
-func latestSuccess(ctx context.Context, tx *sql.Tx, tokenID int64) (*model.Snapshot, error) {
-	var snapshot model.Snapshot
-	var checkedAt int64
-	err := tx.QueryRowContext(ctx, `
-		SELECT id, token_id, checked_at, available_micros, voucher_micros, cash_micros
-		FROM balance_records
-		WHERE token_id = ? AND error = ''
-		ORDER BY id DESC
-		LIMIT 1`, tokenID,
-	).Scan(
-		&snapshot.ID, &snapshot.TokenID, &checkedAt,
-		&snapshot.Balance.AvailableMicros, &snapshot.Balance.VoucherMicros, &snapshot.Balance.CashMicros,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
+func latestSuccess(tx *gorm.DB, tokenID int64) (*model.Snapshot, error) {
+	var record balanceRecord
+	err := tx.Where("token_id = ? AND error = ''", tokenID).Order("id DESC").Take(&record).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("读取上一次成功快照失败: %w", err)
 	}
-	snapshot.CheckedAt = time.UnixMilli(checkedAt)
-	return &snapshot, nil
+	if record.AvailableMicros == nil || record.VoucherMicros == nil || record.CashMicros == nil {
+		return nil, fmt.Errorf("上一次成功快照缺少余额字段")
+	}
+	return &model.Snapshot{
+		ID:        record.ID,
+		TokenID:   record.TokenID,
+		CheckedAt: time.UnixMilli(record.CheckedAt).UTC(),
+		Balance: model.Balance{
+			AvailableMicros: *record.AvailableMicros,
+			VoucherMicros:   *record.VoucherMicros,
+			CashMicros:      *record.CashMicros,
+		},
+	}, nil
 }
 
 // RecordFailure 保存查询异常；空余额字段确保异常不会被当成 0 余额。
@@ -273,11 +287,23 @@ func (s *Store) RecordFailure(ctx context.Context, tokenID int64, checkedAt time
 		runes := []rune(message)
 		message = string(runes[:1000])
 	}
-	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO balance_records(token_id, checked_at, error) VALUES (?, ?, ?)`,
-		tokenID, checkedAt.UTC().UnixMilli(), message,
-	); err != nil {
+	record := balanceRecord{
+		TokenID:   tokenID,
+		CheckedAt: checkedAt.UTC().UnixMilli(),
+		Error:     message,
+	}
+	if err := s.db.WithContext(ctx).Create(&record).Error; err != nil {
 		return fmt.Errorf("保存查询异常失败: %w", err)
 	}
 	return nil
+}
+
+func tokenFromRecord(record tokenRecord) model.Token {
+	return model.Token{
+		ID:         record.ID,
+		Name:       record.Name,
+		Remark:     record.Remark,
+		Ciphertext: record.TokenCiphertext,
+		CreatedAt:  time.UnixMilli(record.CreatedAt).UTC(),
+	}
 }

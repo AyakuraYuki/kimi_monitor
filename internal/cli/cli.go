@@ -80,6 +80,7 @@ func newRootCommand(stdin io.Reader, stdout io.Writer, logger *zerolog.Logger) *
 		newGenerateKeyCommand(),
 		newAddCommand(&configPath, logger),
 		newListCommand(&configPath),
+		newRemarkCommand(&configPath, logger),
 		newRemoveCommand(&configPath, logger),
 		newRunCommand(&configPath, logger),
 	)
@@ -125,6 +126,19 @@ func newListCommand(configPath *string) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return listTokens(cmd.Context(), *configPath, cmd.OutOrStdout())
+		},
+	}
+}
+
+func newRemarkCommand(configPath *string, logger *zerolog.Logger) *cobra.Command {
+	return &cobra.Command{
+		Use:   "remark <ID|打码名称> <备注>",
+		Short: "设置或清除令牌备注",
+		Example: `  kimi-monitor remark 1 '生产环境主账号'
+  kimi-monitor remark 1 ''`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return setTokenRemark(cmd.Context(), *configPath, args[0], args[1], logger)
 		},
 	}
 }
@@ -228,11 +242,32 @@ func listTokens(ctx context.Context, configPath string, stdout io.Writer) error 
 	}
 	tb := prettytable.NewWriter()
 	tb.SetOutputMirror(stdout)
-	tb.AppendHeader(prettytable.Row{"ID", "Name", "Registered Time"})
+	tb.AppendHeader(prettytable.Row{"ID", "Name", "Remark", "Registered Time"})
 	for _, token := range tokens {
-		tb.AppendRow(prettytable.Row{token.ID, token.Name, token.CreatedAt.In(config.CST()).Format(time.DateTime)})
+		tb.AppendRow(prettytable.Row{token.ID, token.Name, token.Remark, token.CreatedAt.In(config.CST()).Format(time.DateTime)})
 	}
 	tb.Render()
+	return nil
+}
+
+func setTokenRemark(ctx context.Context, configPath, selector, remark string, logger *zerolog.Logger) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	database, err := openDatabase(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	token, err := database.SetTokenRemark(ctx, selector, remark)
+	if err != nil {
+		return err
+	}
+	logger.Info().
+		Int64("token_id", token.ID).
+		Str("token_name", token.Name).
+		Msg("已更新令牌备注")
 	return nil
 }
 

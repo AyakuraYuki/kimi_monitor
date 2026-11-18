@@ -108,6 +108,9 @@ func buildHeader(title string, results []model.TokenResult, checkedAt time.Time,
 func buildTokenBlock(result model.TokenResult, lowThresholdMicros int64) string {
 	var builder strings.Builder
 	_, _ = fmt.Fprintf(&builder, "### #%d `%s`\n", result.TokenID, result.Name)
+	if remark := strings.TrimSpace(result.Remark); remark != "" {
+		_, _ = fmt.Fprintf(&builder, "> 备注：%s\n", markdownText(remark))
+	}
 	if result.Health(lowThresholdMicros) == model.HealthError {
 		builder.WriteString("<font color=\"warning\">⚠️ 查询异常</font>\n")
 		_, _ = fmt.Fprintf(&builder, "> 错误：%s\n", markdownText(errorMessage(result.Err)))

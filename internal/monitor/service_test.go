@@ -177,6 +177,29 @@ func TestReportSplitsWithoutBreakingTokenBlocks(t *testing.T) {
 	}
 }
 
+func TestReportDisplaysEscapedRemark(t *testing.T) {
+	t.Parallel()
+	result := model.TokenResult{
+		TokenID: 1,
+		Name:    "sk-abcd****0123",
+		Remark:  "生产环境 <主账号> `A`\n第二行",
+		Current: &model.Snapshot{Balance: model.Balance{AvailableMicros: 50_000_000}},
+	}
+	message := BuildMessages([]model.TokenResult{result}, time.Now(), 10_000_000)[0]
+	if !strings.Contains(message, "备注：生产环境 &lt;主账号&gt; 'A' 第二行") {
+		t.Fatalf("报告未展示并转义令牌备注: %s", message)
+	}
+	if strings.Contains(message, "<主账号>") || strings.Contains(message, "`A`") {
+		t.Fatalf("令牌备注中的 HTML 或 Markdown 未转义: %s", message)
+	}
+
+	result.Remark = ""
+	message = BuildMessages([]model.TokenResult{result}, time.Now(), 10_000_000)[0]
+	if strings.Contains(message, "备注：") {
+		t.Fatalf("空备注不应占用报告内容: %s", message)
+	}
+}
+
 func TestReportEscapesAPIError(t *testing.T) {
 	t.Parallel()
 	results := []model.TokenResult{{

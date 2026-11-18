@@ -83,7 +83,11 @@ func (s *Service) CheckAll(ctx context.Context) ([]model.TokenResult, error) {
 }
 
 func (s *Service) checkOne(ctx context.Context, token model.Token, checkedAt time.Time) model.TokenResult {
-	result := model.TokenResult{TokenID: token.ID, Name: token.Name}
+	result := model.TokenResult{
+		TokenID: token.ID,
+		Name:    token.Name,
+		Remark:  token.Remark,
+	}
 	plaintext, err := s.Cipher.Decrypt(token.Ciphertext)
 	if err == nil {
 		var balance model.Balance
@@ -92,7 +96,11 @@ func (s *Service) checkOne(ctx context.Context, token model.Token, checkedAt tim
 			var previous *model.Snapshot
 			previous, err = s.Store.RecordSuccess(ctx, token.ID, checkedAt, balance)
 			if err == nil {
-				result.Current = &model.Snapshot{TokenID: token.ID, CheckedAt: checkedAt, Balance: balance}
+				result.Current = &model.Snapshot{
+					TokenID:   token.ID,
+					CheckedAt: checkedAt,
+					Balance:   balance,
+				}
 				result.Previous = previous
 				return result
 			}

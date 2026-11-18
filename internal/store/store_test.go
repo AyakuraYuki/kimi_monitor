@@ -3,8 +3,12 @@ package store
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
 
 	"kimi_balance_monitor/internal/model"
 )
@@ -38,6 +42,9 @@ func TestTokenDeduplicationAndNameCollision(t *testing.T) {
 	if _, err := database.RemoveToken(ctx, first.Name); !errors.Is(err, ErrAmbiguousToken) {
 		t.Fatalf("名称碰撞时删除错误 = %v，期望 ErrAmbiguousToken", err)
 	}
+	if _, err := database.SetTokenRemark(ctx, first.Name, "生产环境"); !errors.Is(err, ErrAmbiguousToken) {
+		t.Fatalf("名称碰撞时设置备注错误 = %v，期望 ErrAmbiguousToken", err)
+	}
 	if _, err := database.RemoveToken(ctx, "1"); err != nil {
 		t.Fatalf("按 ID 删除失败: %v", err)
 	}
@@ -47,6 +54,94 @@ func TestTokenDeduplicationAndNameCollision(t *testing.T) {
 	}
 	if len(tokens) != 1 || tokens[0].ID == first.ID {
 		t.Fatalf("删除后的令牌列表不符合预期: %+v", tokens)
+	}
+}
+
+func TestTokenRemark(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database := openTestStore(t)
+	token, err := database.AddToken(ctx, "sk-abcd****5678", []byte("hash"), []byte("cipher"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token.Remark != "" {
+		t.Fatalf("新令牌备注应为空，实际 = %q", token.Remark)
+	}
+
+	updated, err := database.SetTokenRemark(ctx, strconv.FormatInt(token.ID, 10), "  生产环境主账号  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Remark != "生产环境主账号" {
+		t.Fatalf("设置后的备注 = %q", updated.Remark)
+	}
+	tokens, err := database.ListTokens(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tokens) != 1 || tokens[0].Remark != "生产环境主账号" {
+		t.Fatalf("备注未持久化: %+v", tokens)
+	}
+
+	updated, err = database.SetTokenRemark(ctx, token.Name, "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Remark != "" {
+		t.Fatalf("空白备注应清除已有内容，实际 = %q", updated.Remark)
+	}
+	if _, err := database.SetTokenRemark(ctx, "999", "备注"); !errors.Is(err, ErrTokenNotFound) {
+		t.Fatalf("不存在的令牌设置备注错误 = %v，期望 ErrTokenNotFound", err)
+	}
+}
+
+func TestOpenMigratesLegacyTokensTable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := t.TempDir() + "/legacy.db"
+	legacy, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Exec(`
+		CREATE TABLE tokens (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			token_hash BLOB NOT NULL UNIQUE,
+			token_ciphertext BLOB NOT NULL,
+			created_at INTEGER NOT NULL
+		)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Exec(
+		"INSERT INTO tokens(name, token_hash, token_ciphertext, created_at) VALUES (?, ?, ?, ?)",
+		"sk-abcd****5678", []byte("hash"), []byte("cipher"), time.Now().UnixMilli(),
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	legacySQLDB, err := legacy.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacySQLDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("打开旧数据库并迁移失败: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	tokens, err := database.ListTokens(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tokens) != 1 || tokens[0].Name != "sk-abcd****5678" || tokens[0].Remark != "" {
+		t.Fatalf("旧令牌迁移后数据错误: %+v", tokens)
+	}
+	if _, err := database.SetTokenRemark(ctx, "1", "迁移后备注"); err != nil {
+		t.Fatalf("迁移后设置备注失败: %v", err)
 	}
 }
 

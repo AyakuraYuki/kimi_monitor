@@ -21,6 +21,7 @@ type Balance struct {
 type Token struct {
 	ID         int64
 	Name       string
+	Remark     string
 	Ciphertext []byte
 	CreatedAt  time.Time
 }
@@ -37,6 +38,7 @@ type Snapshot struct {
 type TokenResult struct {
 	TokenID  int64
 	Name     string
+	Remark   string
 	Current  *Snapshot
 	Previous *Snapshot
 	Err      error

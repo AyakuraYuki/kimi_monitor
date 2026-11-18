@@ -103,6 +103,13 @@ wecom:
 		t.Fatalf("数据库未按配置文件目录解析: %v", err)
 	}
 	stdout.Reset()
+	if code := Run(context.Background(), command("remark", "1", "生产环境主账号"), nil, &stdout, &logger); code != 0 {
+		t.Fatalf("remark 退出码 = %d，错误 = %s", code, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "已更新令牌备注") || strings.Contains(stdout.String(), plaintext) {
+		t.Fatalf("remark 输出错误: %s", stdout.String())
+	}
+	stdout.Reset()
 	if code := Run(context.Background(), command("add", "--stdin"), strings.NewReader(plaintext), &stdout, &logger); code != 1 {
 		t.Fatalf("重复 add 退出码 = %d，期望 1", code)
 	}
@@ -145,6 +152,9 @@ wecom:
 		if !strings.Contains(message, expected) || !strings.Contains(message, "sk-abcd****5678") {
 			t.Fatalf("第 %d 轮报告缺少预期内容: %s", index+1, message)
 		}
+		if !strings.Contains(message, "备注：生产环境主账号") {
+			t.Fatalf("第 %d 轮报告缺少令牌备注: %s", index+1, message)
+		}
 		if strings.Contains(message, plaintext) {
 			t.Fatal("报告泄露了令牌明文")
 		}
@@ -157,7 +167,7 @@ wecom:
 	if code := Run(context.Background(), command("list"), nil, &stdout, &logger); code != 0 {
 		t.Fatalf("list 失败: %s", stdout.String())
 	}
-	if strings.Contains(stdout.String(), plaintext) || !strings.Contains(stdout.String(), "sk-abcd****5678") {
+	if strings.Contains(stdout.String(), plaintext) || !strings.Contains(stdout.String(), "sk-abcd****5678") || !strings.Contains(stdout.String(), "生产环境主账号") {
 		t.Fatalf("list 输出错误: %s", stdout.String())
 	}
 	stdout.Reset()
@@ -238,6 +248,8 @@ func TestCLIArgumentValidation(t *testing.T) {
 		{name: "add 缺少令牌", args: []string{"add"}},
 		{name: "add stdin 与位置参数互斥", args: []string{"add", "--stdin", "extra"}},
 		{name: "list 多余参数", args: []string{"list", "extra"}},
+		{name: "remark 缺少备注", args: []string{"remark", "1"}},
+		{name: "remark 参数过多", args: []string{"remark", "1", "备注", "extra"}},
 		{name: "remove 缺少标识", args: []string{"remove"}},
 		{name: "remove 参数过多", args: []string{"remove", "1", "2"}},
 		{name: "run 多余参数", args: []string{"run", "extra"}},
