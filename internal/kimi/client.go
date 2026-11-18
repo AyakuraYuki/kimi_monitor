@@ -65,8 +65,7 @@ func (c *Client) FetchBalance(ctx context.Context, token string) (model.Balance,
 
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		var urlError *url.Error
-		if errors.As(err, &urlError) {
+		if urlError, ok := errors.AsType[*url.Error](err); ok {
 			err = urlError.Err
 		}
 		return model.Balance{}, fmt.Errorf("请求 Kimi 余额接口失败: %w", err)

@@ -69,8 +69,7 @@ func (c *Client) SendMarkdown(ctx context.Context, content string) error {
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		// url.Error 会带完整 webhook URL；只保留底层错误，避免泄露机器人密钥。
-		var urlError *url.Error
-		if errors.As(err, &urlError) {
+		if urlError, ok := errors.AsType[*url.Error](err); ok {
 			err = urlError.Err
 		}
 		return fmt.Errorf("请求企业微信 webhook 失败: %w", err)
