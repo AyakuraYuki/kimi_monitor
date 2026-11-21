@@ -13,6 +13,7 @@ import (
 	"kimi_balance_monitor/internal/model"
 	"kimi_balance_monitor/internal/secrets"
 	"kimi_balance_monitor/internal/store"
+	"kimi_balance_monitor/internal/testdb"
 	"kimi_balance_monitor/internal/wecom"
 )
 
@@ -48,7 +49,7 @@ func newIntegrationService(t *testing.T, api BalanceClient) (*Service, *store.St
 	if err != nil {
 		t.Fatal(err)
 	}
-	database, err := store.Open(context.Background(), t.TempDir()+"/monitor.db")
+	database, err := store.Open(context.Background(), testdb.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

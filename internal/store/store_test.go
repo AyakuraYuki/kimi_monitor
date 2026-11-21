@@ -7,15 +7,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/glebarez/sqlite"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
 	"kimi_balance_monitor/internal/model"
+	"kimi_balance_monitor/internal/testdb"
 )
 
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	database, err := Open(context.Background(), t.TempDir()+"/monitor.db")
+	database, err := Open(context.Background(), testdb.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,18 +100,18 @@ func TestTokenRemark(t *testing.T) {
 func TestOpenMigratesLegacyTokensTable(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	path := t.TempDir() + "/legacy.db"
-	legacy, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
+	dsn := testdb.DSN(t)
+	legacy, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := legacy.Exec(`
 		CREATE TABLE tokens (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id BIGSERIAL PRIMARY KEY,
 			name TEXT NOT NULL,
-			token_hash BLOB NOT NULL UNIQUE,
-			token_ciphertext BLOB NOT NULL,
-			created_at INTEGER NOT NULL
+			token_hash BYTEA NOT NULL CONSTRAINT uni_tokens_token_hash UNIQUE,
+			token_ciphertext BYTEA NOT NULL,
+			created_at BIGINT NOT NULL
 		)`).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +129,7 @@ func TestOpenMigratesLegacyTokensTable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	database, err := Open(ctx, path)
+	database, err := Open(ctx, dsn)
 	if err != nil {
 		t.Fatalf("打开旧数据库并迁移失败: %v", err)
 	}
@@ -182,5 +183,44 @@ func TestFailureDoesNotBreakSuccessfulHistory(t *testing.T) {
 	}
 	if previous == nil || !previous.CheckedAt.Equal(secondTime) || previous.Balance.AvailableMicros != secondBalance.AvailableMicros {
 		t.Fatalf("异常记录不应被当作 0 余额或上一次成功记录: %+v", previous)
+	}
+}
+
+func TestSuccessfulHistorySurvivesReopen(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dsn := testdb.DSN(t)
+	database, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if database != nil {
+			_ = database.Close()
+		}
+	})
+	token, err := database.AddToken(ctx, "sk-abcd****5678", []byte("hash"), []byte("cipher"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstTime := time.Date(2026, 11, 21, 1, 0, 0, 0, time.UTC)
+	firstBalance := model.Balance{AvailableMicros: 50_000_000, VoucherMicros: 20_000_000, CashMicros: 30_000_000}
+	if previous, err := database.RecordSuccess(ctx, token.ID, firstTime, firstBalance); err != nil || previous != nil {
+		t.Fatalf("首次查询记录错误: previous=%+v, err=%v", previous, err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous, err := database.RecordSuccess(ctx, token.ID, firstTime.Add(10*time.Minute), firstBalance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if previous == nil || !previous.CheckedAt.Equal(firstTime) || previous.Balance != firstBalance {
+		t.Fatalf("重新打开数据库后未恢复上一次成功快照: %+v", previous)
 	}
 }

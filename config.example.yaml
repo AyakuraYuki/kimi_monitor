@@ -1,7 +1,7 @@
 # 复制为 config.yaml，填入敏感配置后执行 chmod 600 config.yaml。
 database:
-  # 相对路径以本配置文件所在目录为基准。
-  path: "kimi_monitor.db"
+  # PostgreSQL 数据库需提前创建；程序会自动迁移表结构。
+  dsn: "postgres://kimi_monitor:替换为数据库密码@127.0.0.1:5432/kimi_monitor?sslmode=disable"
 
 security:
   # 使用 kimi-monitor generate-key 生成，不要与 API Key 混淆。

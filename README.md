@@ -1,6 +1,6 @@
 # Kimi 令牌余额监控
 
-一个使用 Go 编写的定时监控服务：通过 Kimi 开放平台接口查询所有令牌的余额，将加密令牌和余额历史保存到 SQLite，并通过企业微信群机器人发送 Markdown 整体报告。
+一个使用 Go 编写的定时监控服务：通过 Kimi 开放平台接口查询所有令牌的余额，将加密令牌和余额历史保存到 PostgreSQL，并通过企业微信群机器人发送 Markdown 整体报告。
 
 ## 功能
 
@@ -16,11 +16,21 @@
 
 ## 构建
 
-需要 Go 1.27 或更新版本。数据库操作使用 GORM，SQLite 使用纯 Go 驱动，不依赖 CGO。
+需要 Go 1.27 或更新版本，以及可访问的 PostgreSQL 数据库。数据库操作使用 GORM 和纯 Go 的 pgx 驱动，不依赖 CGO。
 
 ```bash
 go build -o bin/kimi-monitor ./cmd/kimi-monitor
 ```
+
+## 测试
+
+普通单元测试可直接运行；需要数据库的集成测试通过 `KIMI_MONITOR_TEST_POSTGRES_DSN` 指定测试数据库。测试会创建随机独立 schema，并在结束后删除，不会使用默认 schema：
+
+```bash
+KIMI_MONITOR_TEST_POSTGRES_DSN='postgres://test_user:test_password@127.0.0.1:5432/test_db?sslmode=disable' go test ./...
+```
+
+未设置该环境变量时，PostgreSQL 集成测试会跳过。测试账号需要有创建和删除 schema 的权限，请勿指向生产数据库。
 
 ## YAML 配置
 
@@ -47,8 +57,8 @@ chmod 600 config.yaml
 
 ```yaml
 database:
-  # 相对路径以配置文件所在目录为基准，而不是进程工作目录。
-  path: "kimi_monitor.db"
+  # 数据库需提前创建；密码中的特殊字符需进行 URL 编码。
+  dsn: "postgres://kimi_monitor:替换为数据库密码@127.0.0.1:5432/kimi_monitor?sslmode=disable"
 
 security:
   # 使用 generate-key 生成，不是 Kimi API Key。
@@ -69,16 +79,20 @@ wecom:
 | YAML 配置项 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `security.master_key` | 添加和运行时必填 | 无 | 32 字节主密钥的 Base64 或十六进制表示 |
-| `database.path` | 否 | `kimi_monitor.db` | SQLite 路径；相对路径锚定到配置文件目录 |
+| `database.dsn` | 是 | 无 | PostgreSQL DSN，支持 URL 或 `key=value` 格式 |
 | `monitor.low_balance` | 否 | `10` | 低余额预警线，单位人民币元 |
 | `monitor.interval` | 否 | `10m` | 查询间隔，使用 Go duration 格式 |
 | `monitor.concurrency` | 否 | `4` | 单轮并发查询数 |
 | `kimi.api_base_url` | 否 | `https://api.moonshot.cn` | 与 API Key 所属平台一致的 API 源站 |
 | `wecom.webhook_url` | 运行时必填 | 无 | 企业微信群机器人完整 webhook 地址 |
 
-YAML 解析会拒绝未知字段。配置文件可能同时包含主密钥和 webhook 密钥，因此权限必须设为 `0600`，否则命令会拒绝加载。
+程序不会自动创建 PostgreSQL 数据库，只会自动迁移应用所需的表和索引。DSN 必须指向已经存在且可写的数据库；数据库账号需要创建和修改表的权限。远程连接建议启用 TLS（例如 `sslmode=require` 或 `verify-full`），`sslmode=disable` 仅用于可信的本地环境。
+
+YAML 解析会拒绝未知字段。配置文件包含数据库凭据、主密钥和 webhook 密钥，因此权限必须设为 `0600`，否则命令会拒绝加载。
 
 **主密钥不会写入数据库。必须安全、持久地保存它；丢失后已有令牌无法解密，需要删除并重新添加。不要在同一个数据库上随意更换主密钥。**
+
+从 SQLite 版本升级时，需要将 `database.path` 改为 `database.dsn`。程序不会自动把原 SQLite 数据迁入 PostgreSQL；使用空数据库启动后，已有令牌需重新添加，首轮余额通知也会重新显示“首次记录”。
 
 国内站和国际站的 API Key 独立。使用非默认站点时，请将 `kimi.api_base_url` 设置为该站点的 API 源站；程序会请求其 `/v1/users/me/balance` 路径。
 
@@ -159,12 +173,12 @@ printf '%s\n' 'sk-新令牌' | ./bin/kimi-monitor --config /path/to/config.yaml 
 ./bin/kimi-monitor --config /path/to/config.yaml remove 2
 ```
 
-服务每一轮都会重新读取 SQLite 的 `tokens` 表，不在内存中缓存令牌清单。独立 CLI 通过同一数据库写入后：
+服务每一轮都会重新读取 PostgreSQL 的 `tokens` 表，不在内存中缓存令牌清单。独立 CLI 通过同一数据库写入后：
 
 - 新增令牌最迟在下一轮自动加入查询和推送，无需重启服务。
 - 删除令牌最迟在下一轮停止查询。
 - 如果管理操作发生在某一轮查询进行中，该轮可能沿用轮次开始时的清单，下一轮会读取最新清单。
-- SQLite 使用 WAL 模式和 5 秒 busy timeout，支持服务与短时管理命令同时访问。
+- 服务与短时管理命令使用独立的 PostgreSQL 连接，可以同时访问同一数据库。
 
 YAML 配置本身的修改不会自动热加载，修改后需要重启服务；令牌增删不需要重启。
 
@@ -228,7 +242,7 @@ YAML 配置本身的修改不会自动热加载，修改后需要重启服务；
 | --- | --- |
 | 二进制 | `/opt/kimi-monitor/bin/kimi-monitor` |
 | YAML 配置 | `/etc/kimi-monitor/config.yaml` |
-| SQLite 数据 | `/var/lib/kimi-monitor/kimi_monitor.db` |
+| PostgreSQL 连接 | 由配置文件中的 `database.dsn` 指定 |
 | 运行日志 | `/var/log/kimi-monitor/monitor.log` |
 
 ### 创建用户和目录
@@ -244,7 +258,6 @@ sudo install -o root -g root -m 0755 bin/kimi-monitor \
   /opt/kimi-monitor/bin/kimi-monitor
 
 sudo install -d -o root -g kimi-monitor -m 0750 /etc/kimi-monitor
-sudo install -d -o kimi-monitor -g kimi-monitor -m 0700 /var/lib/kimi-monitor
 sudo install -d -o kimi-monitor -g kimi-monitor -m 0750 /var/log/kimi-monitor
 
 sudo install -o kimi-monitor -g kimi-monitor -m 0600 \
@@ -255,7 +268,7 @@ sudo install -o kimi-monitor -g kimi-monitor -m 0600 \
 
 ```yaml
 database:
-  path: "/var/lib/kimi-monitor/kimi_monitor.db"
+  dsn: "postgres://kimi_monitor:数据库密码@数据库地址:5432/kimi_monitor?sslmode=require"
 security:
   master_key: "使用 generate-key 生成的主密钥"
 wecom:

@@ -46,7 +46,7 @@ func newRootCommand(stdin io.Reader, stdout io.Writer, logger *zerolog.Logger) *
 
 配置项：
   security.master_key   32 字节主密钥的 Base64 或十六进制表示
-  database.path         SQLite 路径，相对路径锚定到配置文件目录
+  database.dsn          PostgreSQL DSN
   kimi.api_base_url     Kimi API 源站，默认 https://api.moonshot.cn
   monitor.interval      查询间隔，默认 10m
   monitor.low_balance   低余额预警线（元），默认 10
@@ -360,5 +360,5 @@ func cipherFromConfig(cfg config.Config) (*secrets.Cipher, error) {
 }
 
 func openDatabase(ctx context.Context, cfg config.Config) (*store.Store, error) {
-	return store.Open(ctx, cfg.Database.Path)
+	return store.Open(ctx, cfg.Database.DSN)
 }

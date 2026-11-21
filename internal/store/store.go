@@ -4,14 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
-	"github.com/glebarez/sqlite"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
@@ -52,69 +50,38 @@ func (balanceRecord) TableName() string {
 	return "balance_records"
 }
 
-// Store 使用 GORM 持久化令牌密文和所有查询记录。
+// Store 使用 GORM 将令牌密文和所有查询记录持久化到 PostgreSQL。
 type Store struct {
 	db *gorm.DB
 }
 
-// Open 打开数据库并执行幂等迁移，旧数据库会自动补充新增列。
-func Open(ctx context.Context, path string) (*Store, error) {
-	if strings.TrimSpace(path) == "" {
-		return nil, fmt.Errorf("数据库路径不能为空")
-	}
-	if path != ":memory:" {
-		if directory := filepath.Dir(path); directory != "." {
-			if err := os.MkdirAll(directory, 0o700); err != nil {
-				return nil, fmt.Errorf("创建数据库目录失败: %w", err)
-			}
-		}
-		file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
-		if err != nil {
-			return nil, fmt.Errorf("创建数据库失败: %w", err)
-		}
-		if err := file.Close(); err != nil {
-			return nil, fmt.Errorf("关闭数据库文件失败: %w", err)
-		}
-		if err := os.Chmod(path, 0o600); err != nil {
-			return nil, fmt.Errorf("设置数据库权限失败: %w", err)
-		}
+// Open 连接 PostgreSQL 并执行幂等表结构迁移。
+func Open(ctx context.Context, dsn string) (*Store, error) {
+	dsn = strings.TrimSpace(dsn)
+	if dsn == "" {
+		return nil, fmt.Errorf("PostgreSQL DSN 不能为空")
 	}
 
-	gormDB, err := gorm.Open(sqlite.Open(path), &gorm.Config{
+	gormDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
 		Logger:         gormlogger.Default.LogMode(gormlogger.Silent),
 		TranslateError: true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("打开 SQLite 失败: %w", err)
+		return nil, fmt.Errorf("打开 PostgreSQL 失败: %w", err)
 	}
 	sqlDB, err := gormDB.DB()
 	if err != nil {
-		return nil, fmt.Errorf("获取 SQLite 连接失败: %w", err)
+		return nil, fmt.Errorf("获取 PostgreSQL 连接失败: %w", err)
 	}
 	closeOnError := func(err error) (*Store, error) {
 		_ = sqlDB.Close()
 		return nil, err
 	}
-	// 单连接确保 PRAGMA 在每次查询中一致，并减少 SQLite 写锁竞争。
-	sqlDB.SetMaxOpenConns(1)
 	if err := sqlDB.PingContext(ctx); err != nil {
-		return closeOnError(fmt.Errorf("连接 SQLite 失败: %w", err))
+		return closeOnError(fmt.Errorf("连接 PostgreSQL 失败: %w", err))
 	}
-	db := gormDB.WithContext(ctx)
-	for _, pragma := range []string{
-		"PRAGMA busy_timeout = 5000",
-		"PRAGMA foreign_keys = ON",
-		"PRAGMA journal_mode = WAL",
-	} {
-		if err := db.Exec(pragma).Error; err != nil {
-			return closeOnError(fmt.Errorf("初始化 SQLite 参数失败: %w", err))
-		}
-	}
-	if err := db.AutoMigrate(&tokenRecord{}, &balanceRecord{}); err != nil {
+	if err := gormDB.WithContext(ctx).AutoMigrate(&tokenRecord{}, &balanceRecord{}); err != nil {
 		return closeOnError(fmt.Errorf("迁移数据库结构失败: %w", err))
-	}
-	if err := db.Exec("PRAGMA user_version = 2").Error; err != nil {
-		return closeOnError(fmt.Errorf("更新数据库版本失败: %w", err))
 	}
 	return &Store{db: gormDB}, nil
 }

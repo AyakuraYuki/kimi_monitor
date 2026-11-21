@@ -22,7 +22,7 @@ func TestLoad(t *testing.T) {
 	directory := t.TempDir()
 	path := writeConfig(t, directory, `
 database:
-  path: data/monitor.db
+  dsn: "postgres://kimi_monitor:secret@127.0.0.1:5432/kimi_monitor?sslmode=disable"
 security:
   master_key: "unused-in-this-test"
 kimi:
@@ -38,9 +38,9 @@ wecom:
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedDatabase := filepath.Join(directory, "data", "monitor.db")
-	if config.Database.Path != expectedDatabase {
-		t.Fatalf("数据库路径 = %s，期望 %s", config.Database.Path, expectedDatabase)
+	expectedDSN := "postgres://kimi_monitor:secret@127.0.0.1:5432/kimi_monitor?sslmode=disable"
+	if config.Database.DSN != expectedDSN {
+		t.Fatalf("数据库 DSN = %s，期望 %s", config.Database.DSN, expectedDSN)
 	}
 	if config.SourcePath != path {
 		t.Fatalf("配置源路径 = %s，期望 %s", config.SourcePath, path)
@@ -55,7 +55,7 @@ wecom:
 
 func TestLoadDefaults(t *testing.T) {
 	t.Parallel()
-	path := writeConfig(t, t.TempDir(), "security:\n  master_key: test\n", 0o600)
+	path := writeConfig(t, t.TempDir(), "database:\n  dsn: postgres://localhost/kimi_monitor\nsecurity:\n  master_key: test\n", 0o600)
 	config, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
@@ -78,9 +78,10 @@ func TestLoadRejectsUnsafeOrInvalidConfig(t *testing.T) {
 	}{
 		{name: "未知字段", body: "unknown: true\n", mode: 0o600, contains: "field unknown not found"},
 		{name: "权限过宽", body: "{}", mode: 0o644, contains: "chmod 600"},
-		{name: "无效间隔", body: "monitor:\n  interval: soon\n", mode: 0o600, contains: "无效时间间隔"},
-		{name: "负数预警线", body: "monitor:\n  low_balance: -1\n", mode: 0o600, contains: "不能为负数"},
-		{name: "零并发", body: "monitor:\n  concurrency: 0\n", mode: 0o600, contains: "必须大于 0"},
+		{name: "缺少 DSN", body: "database:\n  dsn: '  '\n", mode: 0o600, contains: "database.dsn 不能为空"},
+		{name: "无效间隔", body: "database:\n  dsn: postgres://localhost/test\nmonitor:\n  interval: soon\n", mode: 0o600, contains: "无效时间间隔"},
+		{name: "负数预警线", body: "database:\n  dsn: postgres://localhost/test\nmonitor:\n  low_balance: -1\n", mode: 0o600, contains: "不能为负数"},
+		{name: "零并发", body: "database:\n  dsn: postgres://localhost/test\nmonitor:\n  concurrency: 0\n", mode: 0o600, contains: "必须大于 0"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path := writeConfig(t, t.TempDir(), test.body, test.mode)

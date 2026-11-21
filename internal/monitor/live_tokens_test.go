@@ -9,6 +9,7 @@ import (
 	"kimi_balance_monitor/internal/model"
 	"kimi_balance_monitor/internal/secrets"
 	"kimi_balance_monitor/internal/store"
+	"kimi_balance_monitor/internal/testdb"
 )
 
 type recordingAPI struct {
@@ -32,14 +33,14 @@ func (a *recordingAPI) callCount(token string) int {
 func TestNewRoundReadsTokensFromIndependentManagementConnection(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	databasePath := t.TempDir() + "/shared.db"
-	runningStore, err := store.Open(ctx, databasePath)
+	dsn := testdb.DSN(t)
+	runningStore, err := store.Open(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer runningStore.Close()
-	// 模拟独立 CLI 进程：单独打开同一个 SQLite 数据库。
-	managementStore, err := store.Open(ctx, databasePath)
+	// 模拟独立 CLI 进程：单独连接同一个 PostgreSQL schema。
+	managementStore, err := store.Open(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}

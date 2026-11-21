@@ -16,9 +16,11 @@ import (
 	"github.com/rs/zerolog"
 
 	"kimi_balance_monitor/internal/secrets"
+	"kimi_balance_monitor/internal/testdb"
 )
 
 func TestCLIEndToEnd(t *testing.T) {
+	dsn := testdb.DSN(t)
 	const plaintext = "sk-abcdefghijklmnop12345678"
 	var mutex sync.Mutex
 	available := "50"
@@ -60,7 +62,7 @@ func TestCLIEndToEnd(t *testing.T) {
 	configPath := filepath.Join(directory, "config.yaml")
 	configBody := fmt.Sprintf(`
 database:
-  path: data/cli.db
+  dsn: %q
 security:
   master_key: %q
 kimi:
@@ -71,7 +73,7 @@ monitor:
   concurrency: 4
 wecom:
   webhook_url: %q
-`, masterKey, kimiServer.URL, wecomServer.URL+"?key=test-secret")
+`, dsn, masterKey, kimiServer.URL, wecomServer.URL+"?key=test-secret")
 	if err := os.WriteFile(configPath, []byte(configBody), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -98,9 +100,6 @@ wecom:
 	}
 	if addLog.Level != "info" || addLog.TokenID != 1 || addLog.TokenName != "sk-abcd****5678" || addLog.Message != "已添加令牌" {
 		t.Fatalf("add 结构化日志错误: %+v", addLog)
-	}
-	if _, err := os.Stat(filepath.Join(directory, "data", "cli.db")); err != nil {
-		t.Fatalf("数据库未按配置文件目录解析: %v", err)
 	}
 	stdout.Reset()
 	if code := Run(context.Background(), command("remark", "1", "生产环境主账号"), nil, &stdout, &logger); code != 0 {
