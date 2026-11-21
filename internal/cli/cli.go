@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -177,17 +178,30 @@ func generateKey(stdout io.Writer) error {
 	return err
 }
 
+const maxTokenBytes = 4096
+
+func readTokenFromStdin(stdin io.Reader) (string, error) {
+	// 最多读取一个令牌及 LF/CRLF；读到首个换行即返回，不等待 EOF。
+	reader := bufio.NewReader(io.LimitReader(stdin, maxTokenBytes+2))
+	data, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("从标准输入读取令牌失败: %w", err)
+	}
+	token := strings.TrimSpace(data)
+	if len(token) > maxTokenBytes {
+		return "", fmt.Errorf("令牌输入超过 %d 字节", maxTokenBytes)
+	}
+	return token, nil
+}
+
 func addToken(ctx context.Context, configPath string, args []string, fromStdin bool, stdin io.Reader, logger *zerolog.Logger) error {
 	var token string
 	if fromStdin {
-		data, err := io.ReadAll(io.LimitReader(stdin, 4097))
+		input, err := readTokenFromStdin(stdin)
 		if err != nil {
-			return fmt.Errorf("从标准输入读取令牌失败: %w", err)
+			return err
 		}
-		if len(data) > 4096 {
-			return fmt.Errorf("令牌输入超过 4096 字节")
-		}
-		token = strings.TrimSpace(string(data))
+		token = input
 	} else {
 		token = strings.TrimSpace(args[0])
 	}

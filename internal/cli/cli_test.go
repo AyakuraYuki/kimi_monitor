@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -172,6 +174,53 @@ wecom:
 	stdout.Reset()
 	if code := Run(context.Background(), command("remove", "sk-abcd****5678"), nil, &stdout, &logger); code != 0 {
 		t.Fatalf("remove 失败: %s", stdout.String())
+	}
+}
+
+func TestReadTokenFromStdinReturnsAfterNewline(t *testing.T) {
+	t.Parallel()
+	reader, writer := io.Pipe()
+	t.Cleanup(func() {
+		_ = reader.Close()
+		_ = writer.Close()
+	})
+
+	type readResult struct {
+		token string
+		err   error
+	}
+	resultChannel := make(chan readResult, 1)
+	go func() {
+		token, err := readTokenFromStdin(reader)
+		resultChannel <- readResult{token: token, err: err}
+	}()
+
+	const plaintext = "sk-abcdefghijklmnop12345678"
+	if _, err := fmt.Fprintln(writer, plaintext); err != nil {
+		t.Fatal(err)
+	}
+	// 保持 writer 打开，模拟交互终端只按 Enter、不发送 EOF 的场景。
+	select {
+	case result := <-resultChannel:
+		if result.err != nil || result.token != plaintext {
+			t.Fatalf("读取结果 = %q, %v，期望 %q", result.token, result.err, plaintext)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("收到换行后仍在等待 EOF")
+	}
+}
+
+func TestReadTokenFromStdinLengthLimit(t *testing.T) {
+	t.Parallel()
+	maximumToken := strings.Repeat("a", maxTokenBytes)
+	for _, input := range []string{maximumToken, maximumToken + "\n", maximumToken + "\r\n"} {
+		token, err := readTokenFromStdin(strings.NewReader(input))
+		if err != nil || token != maximumToken {
+			t.Fatalf("读取 4096 字节令牌失败: token 长度 = %d, err = %v", len(token), err)
+		}
+	}
+	if _, err := readTokenFromStdin(strings.NewReader(strings.Repeat("a", maxTokenBytes+1) + "\n")); err == nil || !strings.Contains(err.Error(), "超过 4096 字节") {
+		t.Fatalf("超长输入错误 = %v", err)
 	}
 }
 
