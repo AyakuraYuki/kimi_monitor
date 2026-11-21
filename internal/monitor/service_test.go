@@ -177,6 +177,45 @@ func TestReportSplitsWithoutBreakingTokenBlocks(t *testing.T) {
 	}
 }
 
+func TestReportUsesCompactBlockForUnchangedBalance(t *testing.T) {
+	t.Parallel()
+	result := model.TokenResult{
+		TokenID: 2,
+		Name:    "sk-abcd****0123",
+		Remark:  "生产环境 <主账号>",
+		Current: &model.Snapshot{Balance: model.Balance{
+			AvailableMicros: 50_000_000,
+			VoucherMicros:   46_000_000,
+			CashMicros:      4_000_000,
+		}},
+		Previous: &model.Snapshot{Balance: model.Balance{AvailableMicros: 50_000_000}},
+	}
+
+	block := buildTokenBlock(result, 10_000_000)
+	want := "### #2 `sk-abcd****0123`\n" +
+		"> 备注：生产环境 &lt;主账号&gt;\n" +
+		"<font color=\"info\">🟢 正常</font>　可用余额：**¥50.000000**\n\n"
+	if block != want {
+		t.Fatalf("无变化令牌应在可用余额前同行展示状态：\n实际：\n%s\n期望：\n%s", block, want)
+	}
+
+	result.Remark = "  "
+	block = buildTokenBlock(result, 10_000_000)
+	want = "### #2 `sk-abcd****0123`\n" +
+		"<font color=\"info\">🟢 正常</font>　可用余额：**¥50.000000**\n\n"
+	if block != want {
+		t.Fatalf("无变化且无备注的令牌应省略备注：\n实际：\n%s\n期望：\n%s", block, want)
+	}
+
+	result.Previous.Balance.AvailableMicros = 49_000_000
+	block = buildTokenBlock(result, 10_000_000)
+	for _, expected := range []string{"🟢 正常", "📈 补充", "上次可用：", "现金：", "代金券："} {
+		if !strings.Contains(block, expected) {
+			t.Errorf("余额有变化时应保留完整内容，缺少 %q：%s", expected, block)
+		}
+	}
+}
+
 func TestReportDisplaysEscapedRemark(t *testing.T) {
 	t.Parallel()
 	result := model.TokenResult{

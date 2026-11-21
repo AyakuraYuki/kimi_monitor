@@ -108,9 +108,11 @@ func buildHeader(title string, results []model.TokenResult, checkedAt time.Time,
 func buildTokenBlock(result model.TokenResult, lowThresholdMicros int64) string {
 	var builder strings.Builder
 	_, _ = fmt.Fprintf(&builder, "### #%d `%s`\n", result.TokenID, result.Name)
+
 	if remark := strings.TrimSpace(result.Remark); remark != "" {
 		_, _ = fmt.Fprintf(&builder, "> 备注：%s\n", markdownText(remark))
 	}
+
 	if result.Health(lowThresholdMicros) == model.HealthError {
 		builder.WriteString("<font color=\"warning\">⚠️ 查询异常</font>\n")
 		_, _ = fmt.Fprintf(&builder, "> 错误：%s\n", markdownText(errorMessage(result.Err)))
@@ -118,20 +120,36 @@ func buildTokenBlock(result model.TokenResult, lowThresholdMicros int64) string 
 		return builder.String()
 	}
 
-	_, _ = fmt.Fprintf(&builder, "%s　%s\n", statusText(result.Health(lowThresholdMicros)), changeText(result))
-	_, _ = fmt.Fprintf(&builder, "> 可用余额：**%s**\n", model.FormatCNY(result.Current.Balance.AvailableMicros))
+	var (
+		status  = statusText(result.Health(lowThresholdMicros))
+		balance = model.FormatCNY(result.Current.Balance.AvailableMicros)
+	)
+
+	if result.Change() == model.ChangeUnchanged {
+		_, _ = fmt.Fprintf(&builder, "%s　可用余额：**%s**\n\n", status, balance)
+		return builder.String()
+	}
+
+	_, _ = fmt.Fprintf(&builder, "%s　%s\n", status, changeText(result))
+	_, _ = fmt.Fprintf(&builder, "> 可用余额：**%s**\n", balance)
+
 	if result.Previous != nil {
-		_, _ = fmt.Fprintf(&builder, "> 上次可用：%s（%s）\n",
-			model.FormatCNY(result.Previous.Balance.AvailableMicros),
-			result.Previous.CheckedAt.In(config.CST()).Format(time.DateTime))
+		var (
+			available = model.FormatCNY(result.Previous.Balance.AvailableMicros)
+			checkedAt = result.Previous.CheckedAt.In(config.CST()).Format(time.DateTime)
+		)
+		_, _ = fmt.Fprintf(&builder, "> 上次可用：%s（%s）\n", available, checkedAt)
 	}
+
+	var (
+		cash = model.FormatCNY(result.Current.Balance.CashMicros)
+	)
 	if result.Current.Balance.VoucherMicros > 0 {
-		_, _ = fmt.Fprintf(&builder, "> 现金：%s | 代金券：%s\n\n",
-			model.FormatCNY(result.Current.Balance.CashMicros),
-			model.FormatCNY(result.Current.Balance.VoucherMicros))
+		_, _ = fmt.Fprintf(&builder, "> 现金：%s | 代金券：%s\n\n", cash, model.FormatCNY(result.Current.Balance.VoucherMicros))
 	} else {
-		_, _ = fmt.Fprintf(&builder, "> 现金：%s\n\n", model.FormatCNY(result.Current.Balance.CashMicros))
+		_, _ = fmt.Fprintf(&builder, "> 现金：%s\n\n", cash)
 	}
+
 	return builder.String()
 }
 
