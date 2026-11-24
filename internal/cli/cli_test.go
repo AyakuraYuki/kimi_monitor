@@ -159,6 +159,9 @@ wecom:
 		if strings.Contains(message, plaintext) {
 			t.Fatal("报告泄露了令牌明文")
 		}
+		if !strings.Contains(message, "### 消耗统计（北京时间）\n> 今日累计消耗") {
+			t.Fatalf("第 %d 轮报告底部缺少持久化消耗统计: %s", index+1, message)
+		}
 		if index == 1 && (!strings.Contains(message, "余额不足") || !strings.Contains(message, "¥5.000000")) {
 			t.Fatalf("低余额报告错误: %s", message)
 		}

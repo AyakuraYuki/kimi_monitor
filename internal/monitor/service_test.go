@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"kimi_balance_monitor/internal/config"
 	"kimi_balance_monitor/internal/model"
 	"kimi_balance_monitor/internal/secrets"
 	"kimi_balance_monitor/internal/store"
@@ -63,6 +64,82 @@ func newIntegrationService(t *testing.T, api BalanceClient) (*Service, *store.St
 	return &Service{Store: database, API: api, Cipher: cipher, MaxParallel: 1}, database
 }
 
+type consumptionStoreStub struct {
+	Store
+	totals []int64
+	calls  [][2]time.Time
+}
+
+func (s *consumptionStoreStub) SumConsumption(_ context.Context, start, end time.Time) (int64, error) {
+	s.calls = append(s.calls, [2]time.Time{start, end})
+	if len(s.totals) == 0 {
+		return 0, errors.New("意外的消耗统计查询")
+	}
+	total := s.totals[0]
+	s.totals = s.totals[1:]
+	return total, nil
+}
+
+func TestBuildReportUsesBeijingConsumptionWindows(t *testing.T) {
+	for _, testCase := range []struct {
+		name          string
+		checkedAt     time.Time
+		wantYesterday bool
+	}{
+		{name: "首小时包含昨日", checkedAt: time.Date(2026, 11, 24, 0, 30, 45, 0, config.CST()), wantYesterday: true},
+		{name: "首小时后不显示昨日", checkedAt: time.Date(2026, 11, 24, 1, 0, 0, 0, config.CST())},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			database := &consumptionStoreStub{totals: []int64{25_000_000, 15_000_000}}
+			service := &Service{Store: database}
+			results := []model.TokenResult{{
+				TokenID: 1,
+				Name:    "sk-abcd****0123",
+				Current: &model.Snapshot{Balance: model.Balance{AvailableMicros: 50_000_000}},
+			}}
+
+			messages, err := service.BuildReport(t.Context(), results, testCase.checkedAt, 10_000_000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(messages) != 1 {
+				t.Fatalf("消息数 = %d，期望 1", len(messages))
+			}
+			expectedFooter := fmt.Sprintf(
+				"### 消耗统计（北京时间）\n> 今日累计消耗（00:00 至 %s）：**¥25.000000**",
+				testCase.checkedAt.Format("15:04:05"),
+			)
+			if testCase.wantYesterday {
+				expectedFooter += "\n> 昨日总消耗（2026-11-23）：**¥15.000000**"
+			}
+			if !strings.HasSuffix(messages[0], expectedFooter) {
+				t.Fatalf("消耗统计未作为独立区块放在通知底部：\n%s\n期望后缀：\n%s", messages[0], expectedFooter)
+			}
+			if !testCase.wantYesterday && strings.Contains(messages[0], "昨日总消耗") {
+				t.Fatalf("01:00 后不应再显示昨日总消耗：%s", messages[0])
+			}
+
+			todayStart := time.Date(2026, 11, 24, 0, 0, 0, 0, config.CST())
+			expectedCalls := 1
+			if testCase.wantYesterday {
+				expectedCalls = 2
+			}
+			if len(database.calls) != expectedCalls {
+				t.Fatalf("统计查询次数 = %d，期望 %d", len(database.calls), expectedCalls)
+			}
+			if !database.calls[0][0].Equal(todayStart) || !database.calls[0][1].Equal(testCase.checkedAt) {
+				t.Fatalf("今日统计区间错误：%+v", database.calls[0])
+			}
+			if testCase.wantYesterday {
+				yesterdayStart := todayStart.AddDate(0, 0, -1)
+				if !database.calls[1][0].Equal(yesterdayStart) || !database.calls[1][1].Equal(todayStart.Add(-time.Millisecond)) {
+					t.Fatalf("昨日统计区间错误：%+v", database.calls[1])
+				}
+			}
+		})
+	}
+}
+
 func TestStrictBalanceTransitions(t *testing.T) {
 	t.Parallel()
 	values := []int64{50_000_000, 8_000_000, 20_000_000, 0, -2_000_000, -1_000_000, 15_000_000}
@@ -101,7 +178,7 @@ func TestStrictBalanceTransitions(t *testing.T) {
 		if got := result.Change(); got != want.change {
 			t.Errorf("第 %d 轮变动 = %s，期望 %s", i+1, got, want.change)
 		}
-		messages := BuildMessages(results, currentTime, 10_000_000)
+		messages := BuildMessages(results, currentTime, 10_000_000, model.ConsumptionSummary{})
 		if i == 5 && !strings.Contains(messages[0], "已补充，但仍不可用") {
 			t.Errorf("负余额增加时必须同时保留用尽状态: %s", messages[0])
 		}
@@ -154,7 +231,7 @@ func TestReportSplitsWithoutBreakingTokenBlocks(t *testing.T) {
 			Previous: &model.Snapshot{CheckedAt: time.Now(), Balance: model.Balance{AvailableMicros: 50_000_000}},
 		}
 	}
-	messages := BuildMessages(results, time.Now(), 10_000_000)
+	messages := BuildMessages(results, time.Now(), 10_000_000, model.ConsumptionSummary{})
 	if len(messages) < 2 {
 		t.Fatal("大量令牌应自动拆分企业微信消息")
 	}
@@ -165,6 +242,9 @@ func TestReportSplitsWithoutBreakingTokenBlocks(t *testing.T) {
 		if !utf8.ValidString(message) {
 			t.Fatal("消息包含被截断的 UTF-8 字符")
 		}
+	}
+	if !strings.Contains(messages[len(messages)-1], "### 消耗统计（北京时间）") {
+		t.Fatal("拆分后的最后一条消息必须包含独立消耗统计")
 	}
 	for i := range results {
 		heading := fmt.Sprintf("### #%d ", i+1)
@@ -225,7 +305,7 @@ func TestReportDisplaysEscapedRemark(t *testing.T) {
 		Remark:  "生产环境 <主账号> `A`\n第二行",
 		Current: &model.Snapshot{Balance: model.Balance{AvailableMicros: 50_000_000}},
 	}
-	message := BuildMessages([]model.TokenResult{result}, time.Now(), 10_000_000)[0]
+	message := BuildMessages([]model.TokenResult{result}, time.Now(), 10_000_000, model.ConsumptionSummary{})[0]
 	if !strings.Contains(message, "备注：生产环境 &lt;主账号&gt; 'A' 第二行") {
 		t.Fatalf("报告未展示并转义令牌备注: %s", message)
 	}
@@ -234,7 +314,7 @@ func TestReportDisplaysEscapedRemark(t *testing.T) {
 	}
 
 	result.Remark = ""
-	message = BuildMessages([]model.TokenResult{result}, time.Now(), 10_000_000)[0]
+	message = BuildMessages([]model.TokenResult{result}, time.Now(), 10_000_000, model.ConsumptionSummary{})[0]
 	if strings.Contains(message, "备注：") {
 		t.Fatalf("空备注不应占用报告内容: %s", message)
 	}
@@ -247,7 +327,7 @@ func TestReportEscapesAPIError(t *testing.T) {
 		Name:    "sk-abcd****0123",
 		Err:     errors.New("<font color=\"warning\">`bad`\nnext"),
 	}}
-	message := BuildMessages(results, time.Now(), 10_000_000)[0]
+	message := BuildMessages(results, time.Now(), 10_000_000, model.ConsumptionSummary{})[0]
 	if strings.Contains(message, "<font color=\"warning\">`bad`") || strings.Contains(message, "`bad`") {
 		t.Fatalf("API 错误未转义 Markdown: %s", message)
 	}

@@ -44,6 +44,12 @@ type TokenResult struct {
 	Err      error
 }
 
+// ConsumptionSummary 是从持久化快照汇总的当日和昨日消耗，单位为微元。
+type ConsumptionSummary struct {
+	TodayMicros     int64
+	YesterdayMicros int64
+}
+
 // Health 表示余额可用状态，与余额变动方向无关。
 type Health string
 

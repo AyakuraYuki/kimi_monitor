@@ -38,7 +38,7 @@ func (tokenRecord) TableName() string {
 type balanceRecord struct {
 	ID              int64 `gorm:"primaryKey;autoIncrement;index:idx_balance_records_latest_success,where:error = '',sort:desc,priority:2"`
 	TokenID         int64 `gorm:"not null;index:idx_balance_records_latest_success,priority:1"`
-	CheckedAt       int64 `gorm:"not null"`
+	CheckedAt       int64 `gorm:"not null;index:idx_balance_records_checked_at"`
 	AvailableMicros *int64
 	VoucherMicros   *int64
 	CashMicros      *int64
@@ -263,6 +263,32 @@ func (s *Store) RecordFailure(ctx context.Context, tokenID int64, checkedAt time
 		return fmt.Errorf("保存查询异常失败: %w", err)
 	}
 	return nil
+}
+
+// SumConsumption 汇总闭区间 [start, end] 内相邻成功快照的余额下降量。
+// 当天首条快照会与午夜前的最近一次成功快照比较，失败和补充记录不计为消耗。
+func (s *Store) SumConsumption(ctx context.Context, start, end time.Time) (int64, error) {
+	const query = `
+SELECT COALESCE(SUM(previous_record.available_micros - current_record.available_micros), 0)::bigint
+FROM balance_records AS current_record
+JOIN LATERAL (
+	SELECT previous_record.available_micros
+	FROM balance_records AS previous_record
+	WHERE previous_record.token_id = current_record.token_id
+		AND previous_record.error = ''
+		AND previous_record.id < current_record.id
+	ORDER BY previous_record.id DESC
+	LIMIT 1
+) AS previous_record ON TRUE
+WHERE current_record.error = ''
+	AND current_record.checked_at >= ?
+	AND current_record.checked_at <= ?
+	AND current_record.available_micros < previous_record.available_micros`
+	var total int64
+	if err := s.db.WithContext(ctx).Raw(query, start.UTC().UnixMilli(), end.UTC().UnixMilli()).Scan(&total).Error; err != nil {
+		return 0, fmt.Errorf("汇总消耗失败: %w", err)
+	}
+	return total, nil
 }
 
 func tokenFromRecord(record tokenRecord) model.Token {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"kimi_balance_monitor/internal/config"
 	"kimi_balance_monitor/internal/model"
 	"kimi_balance_monitor/internal/secrets"
 )
@@ -23,6 +24,7 @@ type Store interface {
 	ListTokens(ctx context.Context) ([]model.Token, error)
 	RecordSuccess(ctx context.Context, tokenID int64, checkedAt time.Time, balance model.Balance) (*model.Snapshot, error)
 	RecordFailure(ctx context.Context, tokenID int64, checkedAt time.Time, message string) error
+	SumConsumption(ctx context.Context, start, end time.Time) (int64, error)
 }
 
 // Service 执行单轮全量余额查询。
@@ -114,6 +116,27 @@ func (s *Service) checkOne(ctx context.Context, token model.Token, checkedAt tim
 	return result
 }
 
+// BuildReport 从 PostgreSQL 汇总北京时间当日消耗，并在首小时同时汇总昨日消耗。
+func (s *Service) BuildReport(ctx context.Context, results []model.TokenResult, checkedAt time.Time, lowThresholdMicros int64) ([]string, error) {
+	localTime := checkedAt.In(config.CST())
+	year, month, day := localTime.Date()
+	todayStart := time.Date(year, month, day, 0, 0, 0, 0, config.CST())
+	today, err := s.Store.SumConsumption(ctx, todayStart, checkedAt)
+	if err != nil {
+		return nil, fmt.Errorf("统计今日消耗失败: %w", err)
+	}
+	consumption := model.ConsumptionSummary{TodayMicros: today}
+	if localTime.Hour() == 0 {
+		yesterdayStart := todayStart.AddDate(0, 0, -1)
+		yesterday, err := s.Store.SumConsumption(ctx, yesterdayStart, todayStart.Add(-time.Millisecond))
+		if err != nil {
+			return nil, fmt.Errorf("统计昨日消耗失败: %w", err)
+		}
+		consumption.YesterdayMicros = yesterday
+	}
+	return BuildMessages(results, checkedAt, lowThresholdMicros, consumption), nil
+}
+
 // Run 按固定间隔执行查询和整体推送；启动后立即执行第一轮。
 func Run(ctx context.Context, service *Service, notifier interface {
 	SendMarkdown(ctx context.Context, content string) error
@@ -130,7 +153,10 @@ func Run(ctx context.Context, service *Service, notifier interface {
 			logger.Info().Msg("没有已配置的令牌，本轮跳过推送")
 			return nil
 		}
-		messages := BuildMessages(results, time.Now(), lowThresholdMicros)
+		messages, err := service.BuildReport(ctx, results, time.Now(), lowThresholdMicros)
+		if err != nil {
+			return err
+		}
 		for index, message := range messages {
 			if err := notifier.SendMarkdown(ctx, message); err != nil {
 				return fmt.Errorf("推送第 %d/%d 条消息失败: %w", index+1, len(messages), err)

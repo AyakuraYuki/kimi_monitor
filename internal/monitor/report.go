@@ -12,11 +12,12 @@ import (
 )
 
 // BuildMessages 生成整体报告；超出企业微信限制时按完整令牌块拆分。
-func BuildMessages(results []model.TokenResult, checkedAt time.Time, lowThresholdMicros int64) []string {
+func BuildMessages(results []model.TokenResult, checkedAt time.Time, lowThresholdMicros int64, consumption model.ConsumptionSummary) []string {
 	header := buildHeader("## Kimi 令牌余额监控", results, checkedAt, lowThresholdMicros)
 	continuationHeader := buildHeader("## Kimi 令牌余额监控（续）", results, checkedAt, lowThresholdMicros)
+	footer := buildConsumptionFooter(consumption, checkedAt)
 	if len(results) == 0 {
-		return []string{header + "\n暂无已配置的令牌。\n"}
+		return []string{strings.TrimSpace(header + "\n暂无已配置的令牌。\n\n" + footer)}
 	}
 
 	blocks := make([]string, 0, len(results))
@@ -38,10 +39,33 @@ func BuildMessages(results []model.TokenResult, checkedAt time.Time, lowThreshol
 		current += block
 		hasBlocks = true
 	}
-	if hasBlocks {
+	if hasBlocks && len(current)+len(footer) > wecom.MaxMarkdownBytes {
 		messages = append(messages, strings.TrimSpace(current))
+		current = continuationHeader
 	}
+	current += footer
+	messages = append(messages, strings.TrimSpace(current))
 	return messages
+}
+
+func buildConsumptionFooter(consumption model.ConsumptionSummary, checkedAt time.Time) string {
+	localTime := checkedAt.In(config.CST())
+	var builder strings.Builder
+	_, _ = fmt.Fprintf(
+		&builder,
+		"### 消耗统计（北京时间）\n> 今日累计消耗（00:00 至 %s）：**%s**\n",
+		localTime.Format("15:04:05"),
+		model.FormatCNY(consumption.TodayMicros),
+	)
+	if localTime.Hour() == 0 {
+		_, _ = fmt.Fprintf(
+			&builder,
+			"> 昨日总消耗（%s）：**%s**\n",
+			localTime.AddDate(0, 0, -1).Format(time.DateOnly),
+			model.FormatCNY(consumption.YesterdayMicros),
+		)
+	}
+	return builder.String()
 }
 
 func buildHeader(title string, results []model.TokenResult, checkedAt time.Time, lowThresholdMicros int64) string {

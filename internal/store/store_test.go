@@ -10,6 +10,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
+	"kimi_balance_monitor/internal/config"
 	"kimi_balance_monitor/internal/model"
 	"kimi_balance_monitor/internal/testdb"
 )
@@ -183,6 +184,77 @@ func TestFailureDoesNotBreakSuccessfulHistory(t *testing.T) {
 	}
 	if previous == nil || !previous.CheckedAt.Equal(secondTime) || previous.Balance.AvailableMicros != secondBalance.AvailableMicros {
 		t.Fatalf("异常记录不应被当作 0 余额或上一次成功记录: %+v", previous)
+	}
+}
+
+func TestConsumptionSurvivesReopenAndUsesBeijingDayBoundaries(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	dsn := testdb.DSN(t)
+	database, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if database != nil {
+			_ = database.Close()
+		}
+	})
+	firstToken, err := database.AddToken(ctx, "sk-abcd****5678", []byte("consumption-hash-1"), []byte("cipher-1"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondToken, err := database.AddToken(ctx, "sk-wxyz****9012", []byte("consumption-hash-2"), []byte("cipher-2"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	yesterdayStart := time.Date(2026, 11, 23, 0, 0, 0, 0, config.CST())
+	todayStart := yesterdayStart.AddDate(0, 0, 1)
+	record := func(tokenID int64, checkedAt time.Time, available int64) {
+		t.Helper()
+		if _, err := database.RecordSuccess(ctx, tokenID, checkedAt, model.Balance{AvailableMicros: available}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 昨日消耗 10 元；今日跨午夜消耗 10 元，补充后再次消耗 10 元。
+	record(firstToken.ID, yesterdayStart, 110_000_000)
+	record(firstToken.ID, yesterdayStart.Add(23*time.Hour+50*time.Minute), 100_000_000)
+	record(firstToken.ID, todayStart.Add(10*time.Minute), 90_000_000)
+	record(firstToken.ID, todayStart.Add(20*time.Minute), 95_000_000)
+	if err := database.RecordFailure(ctx, firstToken.ID, todayStart.Add(25*time.Minute), "HTTP 500"); err != nil {
+		t.Fatal(err)
+	}
+	record(firstToken.ID, todayStart.Add(30*time.Minute), 85_000_000)
+
+	// 昨日消耗 5 元；今日跨午夜消耗 5 元，截止时间后的消耗不应计入。
+	record(secondToken.ID, yesterdayStart.Add(10*time.Hour), 50_000_000)
+	record(secondToken.ID, yesterdayStart.Add(23*time.Hour), 45_000_000)
+	record(secondToken.ID, todayStart.Add(5*time.Minute), 40_000_000)
+	record(secondToken.ID, todayStart.Add(15*time.Minute), 40_000_000)
+	record(secondToken.ID, todayStart.Add(40*time.Minute), 30_000_000)
+
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("重新打开数据库失败: %v", err)
+	}
+	today, err := database.SumConsumption(ctx, todayStart, todayStart.Add(30*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if today != 25_000_000 {
+		t.Fatalf("重开后今日累计消耗 = %d，期望 %d", today, int64(25_000_000))
+	}
+	yesterday, err := database.SumConsumption(ctx, yesterdayStart, todayStart.Add(-time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if yesterday != 15_000_000 {
+		t.Fatalf("重开后昨日总消耗 = %d，期望 %d", yesterday, int64(15_000_000))
 	}
 }
 

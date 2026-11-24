@@ -342,7 +342,10 @@ func runMonitor(ctx context.Context, configPath string, once bool, logger *zerol
 			logger.Info().Msg("没有已配置的令牌，已跳过查询和推送")
 			return nil
 		}
-		messages := monitor.BuildMessages(results, time.Now(), cfg.LowBalanceMicros())
+		messages, err := service.BuildReport(ctx, results, time.Now(), cfg.LowBalanceMicros())
+		if err != nil {
+			return err
+		}
 		for index, message := range messages {
 			if err := notifier.SendMarkdown(ctx, message); err != nil {
 				return fmt.Errorf("推送第 %d/%d 条消息失败: %w", index+1, len(messages), err)
