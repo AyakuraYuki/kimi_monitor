@@ -265,11 +265,11 @@ func (s *Store) RecordFailure(ctx context.Context, tokenID int64, checkedAt time
 	return nil
 }
 
-// SumConsumption 汇总闭区间 [start, end] 内相邻成功快照的余额下降量。
+// SumConsumptionByToken 按令牌汇总闭区间 [start, end] 内相邻成功快照的余额下降量。
 // 当天首条快照会与午夜前的最近一次成功快照比较，失败和补充记录不计为消耗。
-func (s *Store) SumConsumption(ctx context.Context, start, end time.Time) (int64, error) {
+func (s *Store) SumConsumptionByToken(ctx context.Context, start, end time.Time) (map[int64]int64, error) {
 	const query = `
-SELECT COALESCE(SUM(previous_record.available_micros - current_record.available_micros), 0)::bigint
+SELECT current_record.token_id, SUM(previous_record.available_micros - current_record.available_micros)::bigint AS consumption_micros
 FROM balance_records AS current_record
 JOIN LATERAL (
 	SELECT previous_record.available_micros
@@ -283,12 +283,20 @@ JOIN LATERAL (
 WHERE current_record.error = ''
 	AND current_record.checked_at >= ?
 	AND current_record.checked_at <= ?
-	AND current_record.available_micros < previous_record.available_micros`
-	var total int64
-	if err := s.db.WithContext(ctx).Raw(query, start.UTC().UnixMilli(), end.UTC().UnixMilli()).Scan(&total).Error; err != nil {
-		return 0, fmt.Errorf("汇总消耗失败: %w", err)
+	AND current_record.available_micros < previous_record.available_micros
+GROUP BY current_record.token_id`
+	var rows []struct {
+		TokenID           int64 `gorm:"column:token_id"`
+		ConsumptionMicros int64 `gorm:"column:consumption_micros"`
 	}
-	return total, nil
+	if err := s.db.WithContext(ctx).Raw(query, start.UTC().UnixMilli(), end.UTC().UnixMilli()).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("按令牌汇总消耗失败: %w", err)
+	}
+	totals := make(map[int64]int64, len(rows))
+	for _, row := range rows {
+		totals[row.TokenID] = row.ConsumptionMicros
+	}
+	return totals, nil
 }
 
 func tokenFromRecord(record tokenRecord) model.Token {

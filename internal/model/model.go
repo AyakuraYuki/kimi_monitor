@@ -34,14 +34,15 @@ type Snapshot struct {
 	Balance   Balance
 }
 
-// TokenResult 包含本轮结果以及用于环比的最近一次成功快照。
+// TokenResult 包含本轮结果、最近一次成功快照和当日累计消耗。
 type TokenResult struct {
-	TokenID  int64
-	Name     string
-	Remark   string
-	Current  *Snapshot
-	Previous *Snapshot
-	Err      error
+	TokenID                int64
+	Name                   string
+	Remark                 string
+	Current                *Snapshot
+	Previous               *Snapshot
+	TodayConsumptionMicros int64
+	Err                    error
 }
 
 // ConsumptionSummary 是从持久化快照汇总的当日和昨日消耗，单位为微元。

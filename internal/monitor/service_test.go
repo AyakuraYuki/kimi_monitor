@@ -66,18 +66,18 @@ func newIntegrationService(t *testing.T, api BalanceClient) (*Service, *store.St
 
 type consumptionStoreStub struct {
 	Store
-	totals []int64
-	calls  [][2]time.Time
+	summaries []map[int64]int64
+	calls     [][2]time.Time
 }
 
-func (s *consumptionStoreStub) SumConsumption(_ context.Context, start, end time.Time) (int64, error) {
+func (s *consumptionStoreStub) SumConsumptionByToken(_ context.Context, start, end time.Time) (map[int64]int64, error) {
 	s.calls = append(s.calls, [2]time.Time{start, end})
-	if len(s.totals) == 0 {
-		return 0, errors.New("意外的消耗统计查询")
+	if len(s.summaries) == 0 {
+		return nil, errors.New("意外的消耗统计查询")
 	}
-	total := s.totals[0]
-	s.totals = s.totals[1:]
-	return total, nil
+	summary := s.summaries[0]
+	s.summaries = s.summaries[1:]
+	return summary, nil
 }
 
 func TestBuildReportUsesBeijingConsumptionWindows(t *testing.T) {
@@ -90,13 +90,23 @@ func TestBuildReportUsesBeijingConsumptionWindows(t *testing.T) {
 		{name: "首小时后不显示昨日", checkedAt: time.Date(2026, 11, 24, 1, 0, 0, 0, config.CST())},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			database := &consumptionStoreStub{totals: []int64{25_000_000, 15_000_000}}
-			service := &Service{Store: database}
-			results := []model.TokenResult{{
-				TokenID: 1,
-				Name:    "sk-abcd****0123",
-				Current: &model.Snapshot{Balance: model.Balance{AvailableMicros: 50_000_000}},
+			database := &consumptionStoreStub{summaries: []map[int64]int64{
+				{1: 25_000_000},
+				{1: 10_000_000, 2: 5_000_000},
 			}}
+			service := &Service{Store: database}
+			results := []model.TokenResult{
+				{
+					TokenID: 1,
+					Name:    "sk-abcd****0123",
+					Current: &model.Snapshot{Balance: model.Balance{AvailableMicros: 50_000_000}},
+				},
+				{
+					TokenID: 2,
+					Name:    "sk-wxyz****9012",
+					Current: &model.Snapshot{Balance: model.Balance{AvailableMicros: 30_000_000}},
+				},
+			}
 
 			messages, err := service.BuildReport(t.Context(), results, testCase.checkedAt, 10_000_000)
 			if err != nil {
@@ -104,6 +114,16 @@ func TestBuildReportUsesBeijingConsumptionWindows(t *testing.T) {
 			}
 			if len(messages) != 1 {
 				t.Fatalf("消息数 = %d，期望 1", len(messages))
+			}
+			firstTokenReport, remainingReport, found := strings.Cut(messages[0], "### #2")
+			if !found {
+				t.Fatalf("报告缺少第二个令牌区块：%s", messages[0])
+			}
+			if !strings.Contains(firstTokenReport, "> 当日总消耗：**¥25.000000**") {
+				t.Fatalf("有当日消耗的令牌未展示金额：%s", firstTokenReport)
+			}
+			if strings.Contains(remainingReport, "当日总消耗") {
+				t.Fatalf("没有当日消耗的令牌不应展示该统计行：%s", remainingReport)
 			}
 			expectedFooter := fmt.Sprintf(
 				"### 消耗统计（北京时间）\n> 今日累计消耗（00:00 至 %s）：**¥25.000000**",
@@ -288,6 +308,16 @@ func TestReportUsesCompactBlockForUnchangedBalance(t *testing.T) {
 		t.Fatalf("无变化且无备注的令牌应省略备注：\n实际：\n%s\n期望：\n%s", block, want)
 	}
 
+	result.TodayConsumptionMicros = 2_000_000
+	block = buildTokenBlock(result, 10_000_000)
+	want = "### #2 `sk-abcd****0123`\n" +
+		"<font color=\"info\">🟢 正常</font>　可用余额：**¥50.000000**\n" +
+		"> 当日总消耗：**¥2.000000**\n\n"
+	if block != want {
+		t.Fatalf("有当日消耗时应增加独立统计行：\n实际：\n%s\n期望：\n%s", block, want)
+	}
+
+	result.TodayConsumptionMicros = 0
 	result.Previous.Balance.AvailableMicros = 49_000_000
 	block = buildTokenBlock(result, 10_000_000)
 	for _, expected := range []string{"🟢 正常", "📈 补充", "上次可用：", "现金：", "代金券："} {
@@ -323,9 +353,10 @@ func TestReportDisplaysEscapedRemark(t *testing.T) {
 func TestReportEscapesAPIError(t *testing.T) {
 	t.Parallel()
 	results := []model.TokenResult{{
-		TokenID: 1,
-		Name:    "sk-abcd****0123",
-		Err:     errors.New("<font color=\"warning\">`bad`\nnext"),
+		TokenID:                1,
+		Name:                   "sk-abcd****0123",
+		TodayConsumptionMicros: 1_230_000,
+		Err:                    errors.New("<font color=\"warning\">`bad`\nnext"),
 	}}
 	message := BuildMessages(results, time.Now(), 10_000_000, model.ConsumptionSummary{})[0]
 	if strings.Contains(message, "<font color=\"warning\">`bad`") || strings.Contains(message, "`bad`") {
@@ -333,5 +364,8 @@ func TestReportEscapesAPIError(t *testing.T) {
 	}
 	if !strings.Contains(message, "&lt;font") {
 		t.Fatalf("API 错误中的 HTML 未转义: %s", message)
+	}
+	if !strings.Contains(message, "> 当日总消耗：**¥1.230000**") {
+		t.Fatalf("本轮查询失败不应隐藏当天已经产生的消耗: %s", message)
 	}
 }

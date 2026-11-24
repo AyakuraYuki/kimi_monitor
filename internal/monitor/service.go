@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -24,7 +25,7 @@ type Store interface {
 	ListTokens(ctx context.Context) ([]model.Token, error)
 	RecordSuccess(ctx context.Context, tokenID int64, checkedAt time.Time, balance model.Balance) (*model.Snapshot, error)
 	RecordFailure(ctx context.Context, tokenID int64, checkedAt time.Time, message string) error
-	SumConsumption(ctx context.Context, start, end time.Time) (int64, error)
+	SumConsumptionByToken(ctx context.Context, start, end time.Time) (map[int64]int64, error)
 }
 
 // Service 执行单轮全量余额查询。
@@ -121,20 +122,31 @@ func (s *Service) BuildReport(ctx context.Context, results []model.TokenResult, 
 	localTime := checkedAt.In(config.CST())
 	year, month, day := localTime.Date()
 	todayStart := time.Date(year, month, day, 0, 0, 0, 0, config.CST())
-	today, err := s.Store.SumConsumption(ctx, todayStart, checkedAt)
+	todayByToken, err := s.Store.SumConsumptionByToken(ctx, todayStart, checkedAt)
 	if err != nil {
 		return nil, fmt.Errorf("统计今日消耗失败: %w", err)
 	}
-	consumption := model.ConsumptionSummary{TodayMicros: today}
+	for index := range results {
+		results[index].TodayConsumptionMicros = todayByToken[results[index].TokenID]
+	}
+	consumption := model.ConsumptionSummary{TodayMicros: totalConsumption(todayByToken)}
 	if localTime.Hour() == 0 {
 		yesterdayStart := todayStart.AddDate(0, 0, -1)
-		yesterday, err := s.Store.SumConsumption(ctx, yesterdayStart, todayStart.Add(-time.Millisecond))
+		yesterdayByToken, err := s.Store.SumConsumptionByToken(ctx, yesterdayStart, todayStart.Add(-time.Millisecond))
 		if err != nil {
 			return nil, fmt.Errorf("统计昨日消耗失败: %w", err)
 		}
-		consumption.YesterdayMicros = yesterday
+		consumption.YesterdayMicros = totalConsumption(yesterdayByToken)
 	}
 	return BuildMessages(results, checkedAt, lowThresholdMicros, consumption), nil
+}
+
+func totalConsumption(byToken map[int64]int64) int64 {
+	var total int64
+	for amount := range maps.Values(byToken) {
+		total += amount
+	}
+	return total
 }
 
 // Run 按固定间隔执行查询和整体推送；启动后立即执行第一轮。

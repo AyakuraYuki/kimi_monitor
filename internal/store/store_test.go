@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"maps"
 	"strconv"
 	"testing"
 	"time"
@@ -242,19 +243,21 @@ func TestConsumptionSurvivesReopenAndUsesBeijingDayBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("重新打开数据库失败: %v", err)
 	}
-	today, err := database.SumConsumption(ctx, todayStart, todayStart.Add(30*time.Minute))
+	todayByToken, err := database.SumConsumptionByToken(ctx, todayStart, todayStart.Add(30*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if today != 25_000_000 {
-		t.Fatalf("重开后今日累计消耗 = %d，期望 %d", today, int64(25_000_000))
+	wantToday := map[int64]int64{firstToken.ID: 20_000_000, secondToken.ID: 5_000_000}
+	if !maps.Equal(todayByToken, wantToday) {
+		t.Fatalf("重开后各令牌今日消耗 = %v，期望 %v", todayByToken, wantToday)
 	}
-	yesterday, err := database.SumConsumption(ctx, yesterdayStart, todayStart.Add(-time.Millisecond))
+	yesterdayByToken, err := database.SumConsumptionByToken(ctx, yesterdayStart, todayStart.Add(-time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if yesterday != 15_000_000 {
-		t.Fatalf("重开后昨日总消耗 = %d，期望 %d", yesterday, int64(15_000_000))
+	wantYesterday := map[int64]int64{firstToken.ID: 10_000_000, secondToken.ID: 5_000_000}
+	if !maps.Equal(yesterdayByToken, wantYesterday) {
+		t.Fatalf("重开后各令牌昨日消耗 = %v，期望 %v", yesterdayByToken, wantYesterday)
 	}
 }
 

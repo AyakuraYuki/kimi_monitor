@@ -165,6 +165,9 @@ wecom:
 		if index == 1 && (!strings.Contains(message, "余额不足") || !strings.Contains(message, "¥5.000000")) {
 			t.Fatalf("低余额报告错误: %s", message)
 		}
+		if index == 1 && !strings.Contains(message, "> 当日总消耗：**¥45.000000**") {
+			t.Fatalf("令牌区块缺少当日总消耗: %s", message)
+		}
 	}
 
 	stdout.Reset()
