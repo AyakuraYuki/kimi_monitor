@@ -21,7 +21,11 @@ func BuildMessages(results []model.TokenResult, checkedAt time.Time, lowThreshol
 	}
 
 	blocks := make([]string, 0, len(results))
+	includeYesterday := shouldIncludeYesterday(checkedAt)
 	for _, result := range results {
+		if !includeYesterday {
+			result.YesterdayConsumptionMicros = 0
+		}
 		blocks = append(blocks, buildTokenBlock(result, lowThresholdMicros))
 	}
 	messages := make([]string, 0, 1)
@@ -57,7 +61,7 @@ func buildConsumptionFooter(consumption model.ConsumptionSummary, checkedAt time
 		localTime.Format("15:04:05"),
 		model.FormatCNY(consumption.TodayMicros),
 	)
-	if localTime.Hour() == 0 {
+	if shouldIncludeYesterday(checkedAt) {
 		_, _ = fmt.Fprintf(
 			&builder,
 			"> 昨日总消耗（%s）：**%s**\n",
@@ -66,6 +70,16 @@ func buildConsumptionFooter(consumption model.ConsumptionSummary, checkedAt time
 		)
 	}
 	return builder.String()
+}
+
+// shouldIncludeYesterday 判断通知是否需要展示前一自然日消耗，时段均为左闭右开区间。
+func shouldIncludeYesterday(checkedAt time.Time) bool {
+	switch checkedAt.In(config.CST()).Hour() {
+	case 8, 11, 15:
+		return true
+	default:
+		return false
+	}
 }
 
 func buildHeader(title string, results []model.TokenResult, checkedAt time.Time, lowThresholdMicros int64) string {
@@ -140,7 +154,7 @@ func buildTokenBlock(result model.TokenResult, lowThresholdMicros int64) string 
 	if result.Health(lowThresholdMicros) == model.HealthError {
 		builder.WriteString("<font color=\"warning\">⚠️ 查询异常</font>\n")
 		_, _ = fmt.Fprintf(&builder, "> 错误：%s\n", markdownText(errorMessage(result.Err)))
-		writeTokenConsumption(&builder, result.TodayConsumptionMicros)
+		writeTokenConsumption(&builder, result.TodayConsumptionMicros, result.YesterdayConsumptionMicros)
 		builder.WriteString("> 本轮未生成余额快照；后续环比仍使用最近一次成功记录。\n\n")
 		return builder.String()
 	}
@@ -152,14 +166,14 @@ func buildTokenBlock(result model.TokenResult, lowThresholdMicros int64) string 
 
 	if result.Change() == model.ChangeUnchanged {
 		_, _ = fmt.Fprintf(&builder, "%s　可用余额：**%s**\n", status, balance)
-		writeTokenConsumption(&builder, result.TodayConsumptionMicros)
+		writeTokenConsumption(&builder, result.TodayConsumptionMicros, result.YesterdayConsumptionMicros)
 		builder.WriteString("\n")
 		return builder.String()
 	}
 
 	_, _ = fmt.Fprintf(&builder, "%s　%s\n", status, changeText(result))
 	_, _ = fmt.Fprintf(&builder, "> 可用余额：**%s**\n", balance)
-	writeTokenConsumption(&builder, result.TodayConsumptionMicros)
+	writeTokenConsumption(&builder, result.TodayConsumptionMicros, result.YesterdayConsumptionMicros)
 
 	if result.Previous != nil {
 		var (
@@ -181,11 +195,13 @@ func buildTokenBlock(result model.TokenResult, lowThresholdMicros int64) string 
 	return builder.String()
 }
 
-func writeTokenConsumption(builder *strings.Builder, consumptionMicros int64) {
-	if consumptionMicros <= 0 {
-		return
+func writeTokenConsumption(builder *strings.Builder, todayMicros, yesterdayMicros int64) {
+	if todayMicros > 0 {
+		_, _ = fmt.Fprintf(builder, "> 当日总消耗：**%s**\n", model.FormatCNY(todayMicros))
 	}
-	_, _ = fmt.Fprintf(builder, "> 当日总消耗：**%s**\n", model.FormatCNY(consumptionMicros))
+	if yesterdayMicros > 0 {
+		_, _ = fmt.Fprintf(builder, "> 昨日总消耗：**%s**\n", model.FormatCNY(yesterdayMicros))
+	}
 }
 
 func statusText(health model.Health) string {

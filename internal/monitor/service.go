@@ -117,7 +117,7 @@ func (s *Service) checkOne(ctx context.Context, token model.Token, checkedAt tim
 	return result
 }
 
-// BuildReport 从 PostgreSQL 汇总北京时间当日消耗，并在首小时同时汇总昨日消耗。
+// BuildReport 从 PostgreSQL 汇总北京时间当日消耗，并在指定时段同时汇总昨日消耗。
 func (s *Service) BuildReport(ctx context.Context, results []model.TokenResult, checkedAt time.Time, lowThresholdMicros int64) ([]string, error) {
 	localTime := checkedAt.In(config.CST())
 	year, month, day := localTime.Date()
@@ -130,11 +130,14 @@ func (s *Service) BuildReport(ctx context.Context, results []model.TokenResult, 
 		results[index].TodayConsumptionMicros = todayByToken[results[index].TokenID]
 	}
 	consumption := model.ConsumptionSummary{TodayMicros: totalConsumption(todayByToken)}
-	if localTime.Hour() == 0 {
+	if shouldIncludeYesterday(checkedAt) {
 		yesterdayStart := todayStart.AddDate(0, 0, -1)
 		yesterdayByToken, err := s.Store.SumConsumptionByToken(ctx, yesterdayStart, todayStart.Add(-time.Millisecond))
 		if err != nil {
 			return nil, fmt.Errorf("统计昨日消耗失败: %w", err)
+		}
+		for index := range results {
+			results[index].YesterdayConsumptionMicros = yesterdayByToken[results[index].TokenID]
 		}
 		consumption.YesterdayMicros = totalConsumption(yesterdayByToken)
 	}

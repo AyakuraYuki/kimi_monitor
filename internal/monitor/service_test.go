@@ -86,8 +86,17 @@ func TestBuildReportUsesBeijingConsumptionWindows(t *testing.T) {
 		checkedAt     time.Time
 		wantYesterday bool
 	}{
-		{name: "首小时包含昨日", checkedAt: time.Date(2026, 11, 24, 0, 30, 45, 0, config.CST()), wantYesterday: true},
-		{name: "首小时后不显示昨日", checkedAt: time.Date(2026, 11, 24, 1, 0, 0, 0, config.CST())},
+		{name: "零点不再包含昨日", checkedAt: time.Date(2026, 11, 24, 0, 30, 45, 0, config.CST())},
+		{name: "八点前不包含昨日", checkedAt: time.Date(2026, 11, 24, 7, 59, 59, 0, config.CST())},
+		{name: "八点整包含昨日", checkedAt: time.Date(2026, 11, 24, 8, 0, 0, 0, config.CST()), wantYesterday: true},
+		{name: "八点时段末尾包含昨日", checkedAt: time.Date(2026, 11, 24, 8, 59, 59, 0, config.CST()), wantYesterday: true},
+		{name: "九点整不包含昨日", checkedAt: time.Date(2026, 11, 24, 9, 0, 0, 0, config.CST())},
+		{name: "十一点整包含昨日", checkedAt: time.Date(2026, 11, 24, 11, 0, 0, 0, config.CST()), wantYesterday: true},
+		{name: "十一点时段末尾包含昨日", checkedAt: time.Date(2026, 11, 24, 11, 59, 59, 0, config.CST()), wantYesterday: true},
+		{name: "十二点整不包含昨日", checkedAt: time.Date(2026, 11, 24, 12, 0, 0, 0, config.CST())},
+		{name: "十五点整包含昨日", checkedAt: time.Date(2026, 11, 24, 15, 0, 0, 0, config.CST()), wantYesterday: true},
+		{name: "十五点时段末尾包含昨日", checkedAt: time.Date(2026, 11, 24, 15, 59, 59, 0, config.CST()), wantYesterday: true},
+		{name: "十六点整不包含昨日", checkedAt: time.Date(2026, 11, 24, 16, 0, 0, 0, config.CST())},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			database := &consumptionStoreStub{summaries: []map[int64]int64{
@@ -125,6 +134,14 @@ func TestBuildReportUsesBeijingConsumptionWindows(t *testing.T) {
 			if strings.Contains(remainingReport, "当日总消耗") {
 				t.Fatalf("没有当日消耗的令牌不应展示该统计行：%s", remainingReport)
 			}
+			if testCase.wantYesterday {
+				if !strings.Contains(firstTokenReport, "> 昨日总消耗：**¥10.000000**") {
+					t.Fatalf("第一个令牌未展示自身昨日消耗：%s", firstTokenReport)
+				}
+				if !strings.Contains(remainingReport, "> 昨日总消耗：**¥5.000000**") {
+					t.Fatalf("第二个令牌未展示自身昨日消耗：%s", remainingReport)
+				}
+			}
 			expectedFooter := fmt.Sprintf(
 				"### 消耗统计（北京时间）\n> 今日累计消耗（00:00 至 %s）：**¥25.000000**",
 				testCase.checkedAt.Format("15:04:05"),
@@ -136,7 +153,7 @@ func TestBuildReportUsesBeijingConsumptionWindows(t *testing.T) {
 				t.Fatalf("消耗统计未作为独立区块放在通知底部：\n%s\n期望后缀：\n%s", messages[0], expectedFooter)
 			}
 			if !testCase.wantYesterday && strings.Contains(messages[0], "昨日总消耗") {
-				t.Fatalf("01:00 后不应再显示昨日总消耗：%s", messages[0])
+				t.Fatalf("非昨日统计时段不应显示昨日总消耗：%s", messages[0])
 			}
 
 			todayStart := time.Date(2026, 11, 24, 0, 0, 0, 0, config.CST())
@@ -309,15 +326,18 @@ func TestReportUsesCompactBlockForUnchangedBalance(t *testing.T) {
 	}
 
 	result.TodayConsumptionMicros = 2_000_000
+	result.YesterdayConsumptionMicros = 3_000_000
 	block = buildTokenBlock(result, 10_000_000)
 	want = "### #2 `sk-abcd****0123`\n" +
 		"<font color=\"info\">🟢 正常</font>　可用余额：**¥50.000000**\n" +
-		"> 当日总消耗：**¥2.000000**\n\n"
+		"> 当日总消耗：**¥2.000000**\n" +
+		"> 昨日总消耗：**¥3.000000**\n\n"
 	if block != want {
-		t.Fatalf("有当日消耗时应增加独立统计行：\n实际：\n%s\n期望：\n%s", block, want)
+		t.Fatalf("有消耗统计时应增加独立统计行：\n实际：\n%s\n期望：\n%s", block, want)
 	}
 
 	result.TodayConsumptionMicros = 0
+	result.YesterdayConsumptionMicros = 0
 	result.Previous.Balance.AvailableMicros = 49_000_000
 	block = buildTokenBlock(result, 10_000_000)
 	for _, expected := range []string{"🟢 正常", "📈 补充", "上次可用：", "现金：", "代金券："} {
