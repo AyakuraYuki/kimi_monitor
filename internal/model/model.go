@@ -67,7 +67,11 @@ func (r TokenResult) Health(lowThresholdMicros int64) Health {
 	if r.Err != nil || r.Current == nil {
 		return HealthError
 	}
-	available := r.Current.Balance.AvailableMicros
+	return BalanceHealth(r.Current.Balance.AvailableMicros, lowThresholdMicros)
+}
+
+// BalanceHealth 对最新一次成功采样使用统一的余额预警阈值。
+func BalanceHealth(available, lowThresholdMicros int64) Health {
 	if available <= 0 {
 		return HealthExhausted
 	}
@@ -137,6 +141,15 @@ func ParseMicros(value string) (int64, error) {
 
 // FormatCNY 将微元格式化为带人民币符号的字符串。
 func FormatCNY(micros int64) string {
+	amount := DecimalCNY(micros)
+	if negative, ok := strings.CutPrefix(amount, "-"); ok {
+		return "-¥" + negative
+	}
+	return "¥" + amount
+}
+
+// DecimalCNY 保留六位小数，供界面和 CSV 精确交换人民币金额。
+func DecimalCNY(micros int64) string {
 	sign := ""
 	var absolute uint64
 	if micros < 0 {
@@ -145,5 +158,5 @@ func FormatCNY(micros int64) string {
 	} else {
 		absolute = uint64(micros)
 	}
-	return fmt.Sprintf("%s¥%d.%06d", sign, absolute/uint64(MicrosPerYuan), absolute%uint64(MicrosPerYuan))
+	return fmt.Sprintf("%s%d.%06d", sign, absolute/uint64(MicrosPerYuan), absolute%uint64(MicrosPerYuan))
 }

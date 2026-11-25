@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Kimi Monitor · 额度监控</title>
+  <link rel="icon" href="/assets/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/app.css">
+  <script type="module" src="/assets/app.js"></script>
+</head>
+<body>
+  <div id="boot" class="boot"><img src="/assets/mark.svg" width="44" height="44" alt=""><p>正在连接控制台…</p><noscript>请启用 JavaScript 以登录管理控制台。</noscript></div>
+  <main id="login" hidden>
+    <div class="login-frame">
+      <div class="login-art">
+        <div class="brand"><img src="/assets/mark.svg" width="37" height="37" alt=""><span>Kimi <b>Monitor</b></span></div>
+        <img src="/assets/orbit.svg" class="login-orbit" alt="">
+        <div class="login-intro"><h2>额度监控工作台</h2><p>查看令牌余额、追踪每日消耗，管理监控通知。</p></div>
+      </div>
+      <section class="login-fields">
+        <div class="login-inner">
+          <span class="icon-tile"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#lock"/></svg></span>
+          <h1 tabindex="-1">登录控制台</h1>
+          <p class="muted login-help">使用已授权的管理员账号登录。</p>
+          <p id="login-error" class="error" role="alert" hidden></p>
+          <form id="local-form" method="post" hidden>
+            <label for="username">用户名</label>
+            <input id="username" name="username" autocomplete="username" required maxlength="256">
+            <label for="password">密码</label>
+            <div class="password-field">
+              <input id="password" type="password" name="password" autocomplete="current-password" required>
+              <button type="button" class="icon-button" id="show-password" aria-label="显示密码" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#eye"/></svg></button>
+            </div>
+            <button class="btn primary wide" type="submit">登录<svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#arrow"/></svg></button>
+          </form>
+          <div id="login-divider" class="divider" hidden>或</div>
+          <a id="sso" class="btn wide" href="/auth/oidc/start" hidden><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#sso"/></svg>通过 authentik 登录</a>
+        </div>
+      </section>
+    </div>
+  </main>
+  <div id="shell" hidden>
+    <a id="skip" class="skip" href="#content">跳到主要内容</a>
+    <aside class="sidebar">
+      <a href="#overview" class="brand" aria-label="Kimi Monitor 监控概览"><img src="/assets/mark.svg" width="37" height="37" alt=""><span>Kimi <b>Monitor</b></span></a>
+      <nav id="nav" aria-label="主导航">
+        <a href="#overview"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#dashboard"/></svg>监控概览</a>
+        <a href="#tokens"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#token"/></svg>令牌管理</a>
+        <a href="#consumption"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#report"/></svg>每日消耗</a>
+        <a href="#settings"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#settings"/></svg>通知设置</a>
+      </nav>
+      <div class="account">
+        <span class="avatar"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#user"/></svg></span>
+        <div class="identity"><strong id="who"></strong><small>管理员</small></div>
+        <button type="button" id="logout" class="icon-button" aria-label="退出登录" title="退出登录"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#logout"/></svg></button>
+      </div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar">
+        <div class="crumb"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#layers"/></svg><span>控制台</span><span class="slash">/</span><strong id="crumb"></strong></div>
+        <span class="zone"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#clock"/></svg>北京时间 <span>UTC+8</span></span>
+      </header>
+      <main id="content" tabindex="-1">
+        <header class="page-head"><div><h1 id="title" tabindex="-1"></h1><p id="subtitle" class="muted"></p></div><div id="page-actions" class="actions"></div></header>
+        <div id="view"></div>
+      </main>
+    </div>
+  </div>
+  <dialog id="dialog" aria-labelledby="dialog-title">
+    <div class="dialog-header"><h2 id="dialog-title"></h2><button type="button" class="icon-button close-dialog" aria-label="关闭"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#close"/></svg></button></div>
+    <div id="dialog-body"></div>
+  </dialog>
+  <div id="notice" class="toast" role="status" aria-atomic="true"></div>
+  <div id="sort-notice" class="sr-only" role="status"></div>
+</body>
+</html>

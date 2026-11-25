@@ -7,19 +7,23 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	prettytable "github.com/jedib0t/go-pretty/v6/table"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/term"
 
 	"kimi_balance_monitor/internal/config"
 	"kimi_balance_monitor/internal/kimi"
 	"kimi_balance_monitor/internal/monitor"
 	"kimi_balance_monitor/internal/secrets"
 	"kimi_balance_monitor/internal/store"
-	"kimi_balance_monitor/internal/wecom"
+	"kimi_balance_monitor/internal/web"
 )
 
 var errCommandRequired = errors.New("需要指定要执行的命令")
@@ -52,7 +56,8 @@ func newRootCommand(stdin io.Reader, stdout io.Writer, logger *zerolog.Logger) *
   monitor.interval      查询间隔，默认 10m
   monitor.low_balance   低余额预警线（元），默认 10
   monitor.concurrency   并发查询数，默认 4
-  wecom.webhook_url     企业微信群机器人 webhook 地址
+  wecom.webhook_url     企业微信群机器人默认 webhook 地址
+  web.enabled           运行时启用管理界面，默认关闭
 
 推荐使用 add --stdin，避免明文令牌进入 shell 历史。
 配置文件可能包含敏感信息，权限必须为 0600。`,
@@ -79,6 +84,7 @@ func newRootCommand(stdin io.Reader, stdout io.Writer, logger *zerolog.Logger) *
 	root.PersistentFlags().StringVarP(&configPath, "config", "c", config.DefaultPath, "YAML 配置文件")
 	root.AddCommand(
 		newGenerateKeyCommand(),
+		newHashPasswordCommand(),
 		newAddCommand(&configPath, logger),
 		newListCommand(&configPath),
 		newRemarkCommand(&configPath, logger),
@@ -97,6 +103,58 @@ func newGenerateKeyCommand() *cobra.Command {
 			return generateKey(cmd.OutOrStdout())
 		},
 	}
+}
+
+func newHashPasswordCommand() *cobra.Command {
+	var stdinMode bool
+	cmd := &cobra.Command{
+		Use: "hash-password", Short: "为本地管理员生成 bcrypt 密码哈希",
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) != 0 {
+				return errors.New("密码请从终端或标准输入读取")
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			input := cmd.InOrStdin()
+			var password []byte
+			var err error
+			if file, ok := input.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
+				_, _ = fmt.Fprint(cmd.ErrOrStderr(), "请输入管理员密码（输入隐藏）：")
+				password, err = term.ReadPassword(int(file.Fd()))
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr())
+			} else {
+				if !stdinMode {
+					return errors.New("管道输入请使用 hash-password --stdin")
+				}
+				var line string
+				line, err = bufio.NewReader(io.LimitReader(input, 75)).ReadString('\n')
+				if errors.Is(err, io.EOF) {
+					err = nil
+				}
+				password = []byte(strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r"))
+			}
+			if err != nil {
+				return errors.New("读取密码失败")
+			}
+			defer clear(password)
+			if len(password) < 12 || len(password) > 72 {
+				return errors.New("管理员密码须为 12 至 72 个 UTF-8 字节")
+			}
+			hash, err := bcrypt.GenerateFromPassword(password, bcrypt.DefaultCost)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), string(hash))
+			return err
+		},
+	}
+	cmd.Flags().BoolVar(&stdinMode, "stdin", false, "从管道读取一行密码")
+	cmd.SetErr(os.Stderr)
+	cmd.SetFlagErrorFunc(func(*cobra.Command, error) error {
+		return errors.New("hash-password 仅支持 --stdin 参数")
+	})
+	return cmd
 }
 
 func newAddCommand(configPath *string, logger *zerolog.Logger) *cobra.Command {
@@ -308,24 +366,24 @@ func runMonitor(ctx context.Context, configPath string, once bool, logger *zerol
 	if err != nil {
 		return err
 	}
+
 	cipher, err := cipherFromConfig(cfg)
 	if err != nil {
 		return err
 	}
+
 	httpClient := &http.Client{Timeout: 20 * time.Second}
 	api, err := kimi.NewClient(cfg.Kimi.APIBaseURL, httpClient)
 	if err != nil {
 		return err
 	}
-	notifier, err := wecom.NewClient(cfg.WeCom.WebhookURL, httpClient)
-	if err != nil {
-		return err
-	}
+
 	database, err := openDatabase(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	defer database.Close()
+
 	service := &monitor.Service{
 		Store:       database,
 		API:         api,
@@ -333,39 +391,29 @@ func runMonitor(ctx context.Context, configPath string, once bool, logger *zerol
 		MaxParallel: cfg.Monitor.Concurrency,
 	}
 
-	if once {
-		results, err := service.CheckAll(ctx)
-		if err != nil {
-			return err
-		}
-		if len(results) == 0 {
-			logger.Info().Msg("没有已配置的令牌，已跳过查询和推送")
-			return nil
-		}
-		messages, err := service.BuildReport(ctx, results, time.Now(), cfg.LowBalanceMicros())
-		if err != nil {
-			return err
-		}
-		for index, message := range messages {
-			if err := notifier.SendMarkdown(ctx, message); err != nil {
-				return fmt.Errorf("推送第 %d/%d 条消息失败: %w", index+1, len(messages), err)
-			}
-		}
-		failures := 0
-		for _, result := range results {
-			if result.Err != nil {
-				failures++
-			}
-		}
-		logger.Info().
-			Int("token_count", len(results)).
-			Int("failure_count", failures).
-			Int("message_count", len(messages)).
-			Msg("本轮完成")
-		return nil
+	delivery := &monitor.Delivery{
+		Store:       database,
+		Cipher:      cipher,
+		FallbackURL: cfg.WeCom.WebhookURL,
+		HTTPClient:  httpClient,
 	}
 
-	return monitor.Run(ctx, service, notifier, cfg.Monitor.Interval.Duration, cfg.LowBalanceMicros(), logger)
+	if once {
+		return monitor.RunOnce(ctx, service, delivery, cfg.LowBalanceMicros(), logger)
+	}
+
+	if !cfg.Web.Enabled {
+		return monitor.Run(ctx, service, delivery, cfg.Monitor.Interval.Duration, cfg.LowBalanceMicros(), logger)
+	}
+
+	group, runCtx := errgroup.WithContext(ctx)
+	group.Go(func() error {
+		return web.Run(runCtx, cfg, database, cipher, logger)
+	})
+	group.Go(func() error {
+		return monitor.Run(runCtx, service, delivery, cfg.Monitor.Interval.Duration, cfg.LowBalanceMicros(), logger)
+	})
+	return group.Wait()
 }
 
 func cipherFromConfig(cfg config.Config) (*secrets.Cipher, error) {

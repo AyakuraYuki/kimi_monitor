@@ -16,4 +16,21 @@ monitor:
   concurrency: 4
 
 wecom:
-  webhook_url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=替换为机器人密钥"
+  # 可留空，稍后在控制台添加。界面有配置时优先使用界面配置。
+  webhook_url: ""
+
+web:
+  # 开启后，run 同时启动管理界面；run --once 仍只采集一次。
+  enabled: false
+  # 默认仅本机可达。写成 ":8080" 即监听所有接口，此时由部署网络控制后端端口的可达性。
+  # nginx 需保留原始 Host，并用 $scheme 覆盖 X-Forwarded-Proto。
+  listen: "127.0.0.1:8080"
+  # 本地登录需要同时填写以下两项。使用 kimi-monitor hash-password 获取哈希。
+  username: ""
+  password_hash: ""
+  # 只使用 SSO 时，上面两项保持空白。在 authentik 应用内绑定可登录的组或策略。
+  # 启用 SSO 时，取消以下 YAML 块的注释并填写真实值。
+  # oidc:
+  #   issuer: "https://sso.example.com/application/o/kimi-monitor/"
+  #   client_id: "客户端 ID"
+  #   client_secret: "客户端密钥"

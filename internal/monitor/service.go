@@ -152,48 +152,56 @@ func totalConsumption(byToken map[int64]int64) int64 {
 	return total
 }
 
+// RunOnce 与持续监控共享同一轮采集、推送和通知留存逻辑。
+func RunOnce(ctx context.Context, service *Service, delivery *Delivery, lowThresholdMicros int64, logger *zerolog.Logger) error {
+	results, err := service.CheckAll(ctx)
+	if err != nil {
+		return err
+	}
+	if len(results) == 0 {
+		logger.Info().Msg("没有已配置的令牌，本轮跳过推送")
+		return nil
+	}
+	client, err := delivery.client(ctx)
+	if err != nil {
+		return err
+	}
+	if client == nil {
+		logger.Info().Int("token_count", len(results)).Msg("本轮采集完成，尚未配置企业微信通知")
+		return nil
+	}
+	messages, err := service.BuildReport(ctx, results, time.Now(), lowThresholdMicros)
+	if err != nil {
+		return err
+	}
+	if err := delivery.send(ctx, client, messages); err != nil {
+		return err
+	}
+	failures := 0
+	for _, result := range results {
+		if result.Err != nil {
+			failures++
+		}
+	}
+	logger.Info().
+		Int("token_count", len(results)).
+		Int("failure_count", failures).
+		Int("message_count", len(messages)).
+		Msg("本轮完成")
+	return nil
+}
+
 // Run 按固定间隔执行查询和整体推送；启动后立即执行第一轮。
-func Run(ctx context.Context, service *Service, notifier interface {
-	SendMarkdown(ctx context.Context, content string) error
-}, interval time.Duration, lowThresholdMicros int64, logger *zerolog.Logger) error {
+func Run(ctx context.Context, service *Service, delivery *Delivery, interval time.Duration, lowThresholdMicros int64, logger *zerolog.Logger) error {
 	if interval <= 0 {
 		return fmt.Errorf("查询间隔必须大于 0")
 	}
-	runRound := func() error {
-		results, err := service.CheckAll(ctx)
-		if err != nil {
-			return err
+	run := func() {
+		if err := RunOnce(ctx, service, delivery, lowThresholdMicros, logger); err != nil {
+			logger.Error().Err(err).Msg("本轮监控失败")
 		}
-		if len(results) == 0 {
-			logger.Info().Msg("没有已配置的令牌，本轮跳过推送")
-			return nil
-		}
-		messages, err := service.BuildReport(ctx, results, time.Now(), lowThresholdMicros)
-		if err != nil {
-			return err
-		}
-		for index, message := range messages {
-			if err := notifier.SendMarkdown(ctx, message); err != nil {
-				return fmt.Errorf("推送第 %d/%d 条消息失败: %w", index+1, len(messages), err)
-			}
-		}
-		failures := 0
-		for _, result := range results {
-			if result.Err != nil {
-				failures++
-			}
-		}
-		logger.Info().
-			Int("token_count", len(results)).
-			Int("failure_count", failures).
-			Int("message_count", len(messages)).
-			Msg("本轮完成")
-		return nil
 	}
-
-	if err := runRound(); err != nil {
-		logger.Error().Err(err).Msg("本轮监控失败")
-	}
+	run()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -201,9 +209,7 @@ func Run(ctx context.Context, service *Service, notifier interface {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := runRound(); err != nil {
-				logger.Error().Err(err).Msg("本轮监控失败")
-			}
+			run()
 		}
 	}
 }

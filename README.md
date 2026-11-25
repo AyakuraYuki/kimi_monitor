@@ -4,7 +4,8 @@
 
 ## 功能
 
-- 命令行添加、查看、设置备注、删除令牌。
+- Gin 管理控制台支持本地密码和 authentik 单点登录，可查看采样、通知原文、每日消费并导出 CSV。
+- 支持通过命令行或控制台添加、查看、设置备注和删除令牌。
 - 令牌使用 AES-256-GCM 加密后保存；去重使用独立密钥派生的 HMAC-SHA256 摘要。
 - 数据库唯一约束阻止重复添加，管理名统一为 `sk-abcd****0123`。
 - 启动后立即查询，之后默认每 10 分钟进行一轮全量查询。
@@ -49,13 +50,13 @@ cp config.example.yaml config.yaml
 ./bin/kimi-monitor generate-key
 ```
 
-将生成的密钥填入 `security.master_key`，同时填写企业微信 webhook，然后限制配置文件权限：
+将生成的密钥填入 `security.master_key`，可按需填写默认企业微信 webhook，并限制配置文件权限：
 
 ```bash
 chmod 600 config.yaml
 ```
 
-完整配置示例：
+监控配置示例（Web 配置见下文及 `config.example.yaml`）：
 
 ```yaml
 database:
@@ -86,7 +87,7 @@ wecom:
 | `monitor.interval` | 否 | `10m` | 查询间隔，使用 Go duration 格式 |
 | `monitor.concurrency` | 否 | `4` | 单轮并发查询数 |
 | `kimi.api_base_url` | 否 | `https://api.moonshot.cn` | 与 API Key 所属平台一致的 API 源站 |
-| `wecom.webhook_url` | 运行时必填 | 无 | 企业微信群机器人完整 webhook 地址 |
+| `wecom.webhook_url` | 否 | 无 | 企业微信群机器人默认地址，界面保存的地址优先 |
 
 程序不会自动创建 PostgreSQL 数据库，只会自动迁移应用所需的表和索引。DSN 必须指向已经存在且可写的数据库；数据库账号需要创建和修改表的权限。远程连接建议启用 TLS（例如 `sslmode=require` 或 `verify-full`），`sslmode=disable` 仅用于可信的本地环境。
 
@@ -97,6 +98,91 @@ YAML 解析会拒绝未知字段。配置文件包含数据库凭据、主密钥
 从 SQLite 版本升级时，需要将 `database.path` 改为 `database.dsn`。程序不会自动把原 SQLite 数据迁入 PostgreSQL；使用空数据库启动后，已有令牌需重新添加，首轮余额通知也会重新显示“首次记录”。
 
 国内站和国际站的 API Key 独立。使用非默认站点时，请将 `kimi.api_base_url` 设置为该站点的 API 源站；程序会请求其 `/v1/users/me/balance` 路径。
+
+## 管理控制台
+
+控制台和静态资源随 Go 二进制发布。已有配置默认只启动采集。要启用本地登录，运行以下命令，在终端中输入管理员密码，然后复制输出的 bcrypt 哈希。密码支持 12 至 72 个 UTF-8 字节；密码管理器或管道可使用 `hash-password --stdin`。
+
+```bash
+./bin/kimi-monitor hash-password
+```
+
+在权限为 `0600` 的配置中加入以下内容，然后运行 `./bin/kimi-monitor --config config.yaml run`。在本机打开 `http://127.0.0.1:8080`，使用配置的管理员账号登录。输入哈希时请保留完整的美元符号及其后全部字符。
+
+```yaml
+web:
+  enabled: true
+  listen: "127.0.0.1:8080"
+  username: "admin"
+  password_hash: '替换为 hash-password 的输出'
+```
+
+### 通过 nginx 使用自己的域名
+
+`web.listen` 省略时默认为 `127.0.0.1:8080`。同机 nginx 可直接转发到这个地址。若 nginx 位于其他主机或容器，可设置 `listen: ":8080"` 监听所有网络接口，并通过防火墙或容器网络只允许代理访问后端端口。
+
+nginx 负责终止 HTTPS，将包含端口的原始 `Host` 转发给控制台，并用 `$scheme` 覆盖 `X-Forwarded-Proto`。控制台从 `Host` 获取公开域名及端口，接受任何直接连接方提供的单个 `X-Forwarded-Proto` 值（`http` 或 `https`），因此由部署网络限制谁能连接后端。远程浏览器需使用 HTTPS，本机回环连接可用 HTTP 访问回环地址。
+
+以下示例放在 nginx 的 `http` 块内。将域名和证书路径换成自己的值，证书需覆盖两个域名。若该端口已有默认虚拟主机，在现有默认主机中拒绝未匹配的域名。访问日志中的 `$uri` 只记录路径，避免写入 OIDC 回调查询中的一次性授权码。[nginx 虚拟主机匹配](https://nginx.org/en/docs/http/request_processing.html) · [nginx 转发请求头](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_set_header)
+
+```nginx
+log_format kimi_path '$remote_addr [$time_local] "$request_method $uri" $status';
+
+server {
+    listen 443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;
+    return 444;
+}
+
+server {
+    listen 443 ssl;
+    server_name monitor.example.com monitor.internal.example.com;
+    ssl_certificate     /etc/nginx/tls/monitor-fullchain.pem;
+    ssl_certificate_key /etc/nginx/tls/monitor-key.pem;
+    access_log /var/log/nginx/kimi-monitor.log kimi_path;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+新增域名时，更新 DNS、证书与 nginx，启用 SSO 时还需登记对应的回调地址。登录会话和进行中的 OIDC 登录绑定访问源，不同域名需要分别登录。会话由单个服务实例保存，8 小时后到期，退出登录或重启进程即失效。同一代理后的用户共享基于直接连接来源的登录限流额度。
+
+### 使用 authentik 登录
+
+1. 在 authentik 创建应用及关联的 OAuth2/OpenID Provider。客户端类型选 **Confidential**，配置签名密钥，选择 `openid`、`profile` scope mappings。控制台采用 Authorization Code 流程并发送 PKCE S256 challenge。[authentik OAuth 2.0 Provider](https://docs.goauthentik.io/add-secure-apps/providers/oauth2/)
+2. 在 Provider 的 **Redirect URIs** 下为每个入口添加一条 **Strict** 授权回调。例如上面的两个域名分别填写 `https://monitor.example.com/auth/oidc/callback` 和 `https://monitor.internal.example.com/auth/oidc/callback`。使用非默认 HTTPS 端口时也要填入端口。
+3. 在 **Applications → Applications** 打开监控应用，进入 **Policy / Group / User Bindings → Create or bind… → Bind a group**，选择允许管理令牌和通知的组，如 `kimi-monitor-admins`。也可以在同一位置绑定已有的授权策略。authentik 的默认设置允许所有用户访问没有绑定的应用。[authentik 应用访问绑定](https://docs.goauthentik.io/add-secure-apps/applications/manage_apps#use-bindings-to-control-access)
+4. 将 Provider 的完整 issuer（保留结尾斜杠）、Client ID 和 Client Secret 填入 YAML 并重启。仅使用 SSO 时，将本地用户名与密码哈希留空。SSO 用户的访问权限由 authentik 的应用绑定决定，无需在 ID Token 中映射 `groups` 声明。登录成功的用户都拥有令牌和通知管理权限。
+
+```yaml
+web:
+  enabled: true
+  listen: "127.0.0.1:8080"
+  oidc:
+    issuer: "https://sso.example.com/application/o/kimi-monitor/"
+    client_id: "应用的 Client ID"
+    client_secret: "应用的 Client Secret"
+```
+
+**从旧版升级时**，若此前通过 `web.oidc.allowed_groups` 限制访问，先将对应的组绑定到 authentik 应用并确认其准入规则。旧 YAML 中的 `web.public_url`、`web.trusted_proxies` 和 `web.oidc.allowed_groups` 均须删除，严格解析会拒绝这些已移除的字段。
+
+### 查看、管理和导出
+
+- **监控概览**展示最近一次采集状态及成功余额。采集失败后仍可查看上次成功的金额和时间。通知预览展示企业微信已确认接收的原文；分片发送时记录实际送达的片数。升级后首次发送成功即开始保留预览。
+- **令牌管理**支持添加推理 API Key、修改或清空备注，以及确认删除。已有 Key 始终只显示打码名；删除沿用 CLI 行为，同时删除其余额与消费历史。已发送的通知保留发送时的原文。
+- **每日消费**按北京时间自然日查询，起止日期均包含，单次最多 366 天。表格和 CSV 共用查询；有成功采样且未观察到下降时金额为零，全天无成功采样时 CSV 金额留空。导出保留六位小数，使用当前令牌备注。以公式字符开头的备注会加文本前缀，便于安全地用电子表格打开。
+- **通知设置**显示当前生效来源及配置文件是否提供兜底。界面保存的 webhook 加密存入数据库，在下一轮推送时生效；清除界面配置即恢复 `wecom.webhook_url`。两处均为空时仍采集余额。完整地址及机器人密钥不会通过读取接口返回。
+
+### 消费口径与后续对账
+
+每个令牌的消费按相邻成功采样之间可用余额的下降量估算，下降归入后一次采样所在的北京时间日期。余额接口返回账户余额：同一账户的多个 Key 可以观察到同一笔下降，采样间发生的充值也可能抵消消费。消费接口标记数据来源为 `balance_snapshots`，并返回本地稳定的 `token_id`。[Kimi 查询余额](https://platform.kimi.com/docs/api/balance)
+
+后续接入正式账单时，可新增组织级采集器，用独立的 `sk-admin-*` 和 `billing:read` 权限读取账单。需要按 Key 匹配时另存官方 Key ID 与本地 ID 的映射，打码名可能重复。对账记录应独立保存，按组织、日期和官方账单维度幂等入库，再与快照估算比较。官方金额以毫分为单位（1 毫分 = 10 微元），时间窗左闭右开，T 日账单自 T+1 日北京时间 07:00 起可查。当前版本只接收推理密钥进行余额监控。[Kimi Admin API 概述](https://platform.kimi.com/docs/admin-api/overview)
 
 ## 令牌管理
 
@@ -272,7 +358,7 @@ sudo install -o kimi-monitor -g kimi-monitor -m 0600 \
   config.example.yaml /etc/kimi-monitor/config.yaml
 ```
 
-编辑 `/etc/kimi-monitor/config.yaml`，至少修改：
+编辑 `/etc/kimi-monitor/config.yaml`，填写数据库、主密钥及可选的默认通知地址：
 
 ```yaml
 database:
@@ -356,7 +442,7 @@ sudo -u kimi-monitor /opt/kimi-monitor/bin/kimi-monitor \
 
 ## 安全说明
 
-- 配置文件必须设置为 `0600`，数据库文件设置为 `0600`，其自动创建的父目录使用 `0700`。
+- 配置文件请设置为 `0600`，并限制 PostgreSQL 应用账户的权限。
 - 数据库加密不能替代对配置文件中主密钥和 webhook URL 的保护。
 - 明文令牌仅在添加和发起 API 查询时存在于进程内存中，不写入日志、报告或数据库明文列。
 - 企业微信网络错误会移除完整 webhook URL，避免泄露机器人密钥。

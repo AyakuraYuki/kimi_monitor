@@ -69,6 +69,15 @@ func derive(masterKey []byte, label string) []byte {
 
 // Encrypt 使用 AES-256-GCM 加密，返回值由随机 nonce 和密文组成。
 func (c *Cipher) Encrypt(plaintext string) ([]byte, error) {
+	return c.seal(plaintext, "kimi-token-v1")
+}
+
+// EncryptWebhook 将机器人密钥与 API Key 密文的用途隔离。
+func (c *Cipher) EncryptWebhook(webhookURL string) ([]byte, error) {
+	return c.seal(webhookURL, "wecom-webhook-v1")
+}
+
+func (c *Cipher) seal(plaintext, purpose string) ([]byte, error) {
 	block, err := aes.NewCipher(c.encryptionKey)
 	if err != nil {
 		return nil, err
@@ -81,11 +90,19 @@ func (c *Cipher) Encrypt(plaintext string) ([]byte, error) {
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("生成加密 nonce 失败: %w", err)
 	}
-	return gcm.Seal(nonce, nonce, []byte(plaintext), []byte("kimi-token-v1")), nil
+	return gcm.Seal(nonce, nonce, []byte(plaintext), []byte(purpose)), nil
 }
 
 // Decrypt 解密并认证数据库中的令牌密文。
 func (c *Cipher) Decrypt(ciphertext []byte) (string, error) {
+	return c.open(ciphertext, "kimi-token-v1")
+}
+
+func (c *Cipher) DecryptWebhook(ciphertext []byte) (string, error) {
+	return c.open(ciphertext, "wecom-webhook-v1")
+}
+
+func (c *Cipher) open(ciphertext []byte, purpose string) (string, error) {
 	block, err := aes.NewCipher(c.encryptionKey)
 	if err != nil {
 		return "", err
@@ -95,12 +112,12 @@ func (c *Cipher) Decrypt(ciphertext []byte) (string, error) {
 		return "", err
 	}
 	if len(ciphertext) < gcm.NonceSize()+gcm.Overhead() {
-		return "", fmt.Errorf("令牌密文长度无效")
+		return "", fmt.Errorf("密文长度无效")
 	}
 	nonce := ciphertext[:gcm.NonceSize()]
-	plaintext, err := gcm.Open(nil, nonce, ciphertext[gcm.NonceSize():], []byte("kimi-token-v1"))
+	plaintext, err := gcm.Open(nil, nonce, ciphertext[gcm.NonceSize():], []byte(purpose))
 	if err != nil {
-		return "", fmt.Errorf("令牌解密失败，请检查 security.master_key: %w", err)
+		return "", fmt.Errorf("解密失败，请检查 security.master_key: %w", err)
 	}
 	return string(plaintext), nil
 }
@@ -114,15 +131,18 @@ func (c *Cipher) Digest(plaintext string) []byte {
 
 // MaskToken 生成 sk-abcd****0123 形式的管理名称。
 func MaskToken(token string) (string, error) {
+	if strings.HasPrefix(token, "sk-admin-") {
+		return "", fmt.Errorf("额度监控需要推理 API Key，请使用普通 Kimi 令牌")
+	}
 	if !strings.HasPrefix(token, "sk-") {
-		return "", fmt.Errorf("Kimi 令牌必须以 sk- 开头")
+		return "", fmt.Errorf("kimi 令牌必须以 sk- 开头")
 	}
 	if len(token) < len("sk-")+12 {
-		return "", fmt.Errorf("Kimi 令牌长度不足，无法安全打码")
+		return "", fmt.Errorf("kimi 令牌长度不足，无法安全打码")
 	}
 	for i := 0; i < len(token); i++ {
 		if token[i] < 0x21 || token[i] > 0x7e {
-			return "", fmt.Errorf("Kimi 令牌包含空白或非 ASCII 字符")
+			return "", fmt.Errorf("kimi 令牌包含空白或非 ASCII 字符")
 		}
 	}
 	return token[:len("sk-")+4] + "****" + token[len(token)-4:], nil

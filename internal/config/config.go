@@ -76,6 +76,7 @@ type Config struct {
 	WeCom struct {
 		WebhookURL string `yaml:"webhook_url"`
 	} `yaml:"wecom"`
+	Web WebConfig `yaml:"web"`
 
 	SourcePath       string `yaml:"-"`
 	lowBalanceMicros int64
@@ -88,6 +89,7 @@ func Default() Config {
 	config.Monitor.Interval = Duration{Duration: 10 * time.Minute}
 	config.Monitor.LowBalance = "10"
 	config.Monitor.Concurrency = 4
+	config.Web.Listen = "127.0.0.1:8080"
 	return config
 }
 
@@ -152,6 +154,11 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("monitor.low_balance 不能为负数")
 	}
 	config.lowBalanceMicros = lowBalanceMicros
+	if config.Web.Enabled {
+		if err := config.Web.Validate(); err != nil {
+			return Config{}, err
+		}
+	}
 	config.SourcePath = absolutePath
 	return config, nil
 }

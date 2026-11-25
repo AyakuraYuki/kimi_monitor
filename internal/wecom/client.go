@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -25,6 +26,21 @@ type Client struct {
 	httpClient *http.Client
 }
 
+var robotKey = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
+
+// ValidateManagedURL 只接受企业微信群机器人的官方发送地址，避免界面配置任意出站请求。
+func ValidateManagedURL(raw string) error {
+	u, err := url.ParseRequestURI(raw)
+	if err == nil && u.Scheme == "https" && u.Host == "qyapi.weixin.qq.com" &&
+		u.User == nil && u.EscapedPath() == "/cgi-bin/webhook/send" && u.Fragment == "" {
+		params, err := url.ParseQuery(u.RawQuery)
+		if err == nil && len(params) == 1 && len(params["key"]) == 1 && robotKey.MatchString(params.Get("key")) {
+			return nil
+		}
+	}
+	return fmt.Errorf("请输入企业微信官方 HTTPS 群机器人 webhook 地址，并包含有效的 key")
+}
+
 // NewClient 创建企业微信 webhook 客户端。
 func NewClient(webhookURL string, httpClient *http.Client) (*Client, error) {
 	webhookURL = strings.TrimSpace(webhookURL)
@@ -38,7 +54,9 @@ func NewClient(webhookURL string, httpClient *http.Client) (*Client, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 20 * time.Second}
 	}
-	return &Client{webhookURL: webhookURL, httpClient: httpClient}, nil
+	client := *httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &Client{webhookURL: webhookURL, httpClient: &client}, nil
 }
 
 // SendMarkdown 发送一条 Markdown 消息，并检查企业微信业务响应码。
@@ -76,7 +94,7 @@ func (c *Client) SendMarkdown(ctx context.Context, content string) error {
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("企业微信 webhook 返回 HTTP %s", response.Status)
+		return fmt.Errorf("企业微信 webhook 返回 HTTP %d", response.StatusCode)
 	}
 
 	var result struct {
@@ -90,7 +108,12 @@ func (c *Client) SendMarkdown(ctx context.Context, content string) error {
 		return fmt.Errorf("企业微信响应缺少 errcode")
 	}
 	if *result.Errcode != 0 {
-		return fmt.Errorf("企业微信返回错误(errcode=%d): %s", *result.Errcode, result.Errmsg)
+		msg := strings.ReplaceAll(result.Errmsg, c.webhookURL, "[已隐藏]")
+		u, _ := url.Parse(c.webhookURL)
+		if key := u.Query().Get("key"); key != "" {
+			msg = strings.ReplaceAll(msg, key, "[已隐藏]")
+		}
+		return fmt.Errorf("企业微信返回错误(errcode=%d): %s", *result.Errcode, msg)
 	}
 	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -80,5 +81,45 @@ func TestFetchBalanceErrors(t *testing.T) {
 	_, err = client.FetchBalance(context.Background(), echoToken)
 	if err == nil || strings.Contains(err.Error(), echoToken) || !strings.Contains(err.Error(), "[已隐藏]") {
 		t.Fatalf("上游错误响应不应回显令牌: %v", err)
+	}
+}
+
+func TestHTTPErrorRedactionBeforeTruncation(t *testing.T) {
+	const marker = "test-credential-never-in-a-report"
+	for _, size := range []int{250, (64 << 10) - 8} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = fmt.Fprint(w, strings.Repeat("x", size)+marker)
+			}))
+			t.Cleanup(server.Close)
+			client, err := NewClient(server.URL, server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.FetchBalance(t.Context(), marker)
+			if err == nil || !strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), marker[:5]) {
+				t.Fatal("error must retain the status code and omit credential fragments")
+			}
+		})
+	}
+}
+
+func TestBalanceDoesNotFollowRedirects(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/users/me/balance" {
+			t.Error("unexpected request after balance endpoint redirect")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		http.Redirect(w, r, "/other", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(server.Close)
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.FetchBalance(t.Context(), "test-only"); err == nil || !strings.Contains(err.Error(), "307") {
+		t.Fatal("expected the initial redirect status")
 	}
 }

@@ -32,7 +32,9 @@ func NewClient(baseURL string, httpClient *http.Client) (*Client, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 20 * time.Second}
 	}
-	return &Client{endpoint: baseURL + "/v1/users/me/balance", httpClient: httpClient}, nil
+	client := *httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &Client{endpoint: baseURL + "/v1/users/me/balance", httpClient: &client}, nil
 }
 
 type errorDetail struct {
@@ -74,7 +76,12 @@ func (c *Client) FetchBalance(ctx context.Context, token string) (model.Balance,
 
 	body := io.LimitReader(response.Body, maxResponseBytes)
 	if response.StatusCode != http.StatusOK {
-		limited, _ := io.ReadAll(io.LimitReader(body, 64<<10))
+		const maxErrorBody = 64 << 10
+		limited, readErr := io.ReadAll(io.LimitReader(body, maxErrorBody+1))
+		// 部分响应可能正好在令牌中间结束，不能作为可安全脱敏的完整文本。
+		if readErr != nil || len(limited) > maxErrorBody {
+			return model.Balance{}, fmt.Errorf("Kimi API 返回 HTTP %d，错误详情读取不完整", response.StatusCode)
+		}
 		var payload struct {
 			Error *errorDetail `json:"error"`
 		}
@@ -83,19 +90,16 @@ func (c *Client) FetchBalance(ctx context.Context, token string) (model.Balance,
 		if payload.Error != nil && payload.Error.Message != "" {
 			message = payload.Error.Message
 		} else if text := strings.TrimSpace(string(limited)); text != "" {
-			runes := []rune(text)
-			if len(runes) > 256 {
-				text = string(runes[:256])
-			}
 			message = text
 		}
-		return model.Balance{}, fmt.Errorf("Kimi API 返回 %s: %s", response.Status, redactToken(message, token))
+		runes := []rune(redactToken(message, token))
+		return model.Balance{}, fmt.Errorf("Kimi API 返回 HTTP %d: %s", response.StatusCode, string(runes[:min(len(runes), 256)]))
 	}
 
 	var payload balanceResponse
 	decoder := json.NewDecoder(body)
 	if err := decoder.Decode(&payload); err != nil {
-		return model.Balance{}, fmt.Errorf("解析 Kimi 余额响应失败: %w", err)
+		return model.Balance{}, fmt.Errorf("解析 Kimi 余额响应失败: %s", redactToken(err.Error(), token))
 	}
 	if payload.Code == nil || payload.Status == nil {
 		return model.Balance{}, fmt.Errorf("Kimi 余额响应缺少 code 或 status 字段")

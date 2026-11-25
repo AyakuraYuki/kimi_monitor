@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -297,5 +298,13 @@ func TestSuccessfulHistorySurvivesReopen(t *testing.T) {
 	}
 	if previous == nil || !previous.CheckedAt.Equal(firstTime) || previous.Balance != firstBalance {
 		t.Fatalf("重新打开数据库后未恢复上一次成功快照: %+v", previous)
+	}
+}
+
+func TestMalformedDSNDoesNotReachLogs(t *testing.T) {
+	const marker = "test-private-dsn-marker"
+	_, err := Open(t.Context(), "postgres://tester:"+marker+"@localhost/%zz")
+	if err == nil || strings.Contains(err.Error(), marker) || !strings.Contains(err.Error(), "database.dsn") {
+		t.Fatal("invalid DSN must identify the setting without echoing credentials")
 	}
 }

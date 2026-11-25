@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"golang.org/x/crypto/bcrypt"
 
 	"kimi_balance_monitor/internal/secrets"
 	"kimi_balance_monitor/internal/testdb"
@@ -320,5 +321,24 @@ func TestCLIArgumentValidation(t *testing.T) {
 				t.Fatalf("缺少参数错误日志: %s", stdout.String())
 			}
 		})
+	}
+}
+
+func TestHashPassword(t *testing.T) {
+	const pass = "test-only-password"
+	var out bytes.Buffer
+	logger := zerolog.New(&out)
+	if code := Run(t.Context(), []string{"hash-password", "--stdin"}, strings.NewReader(pass+"\n"), &out, &logger); code != 0 {
+		t.Fatalf("hash-password returned %d", code)
+	}
+	if err := bcrypt.CompareHashAndPassword(bytes.TrimSpace(out.Bytes()), []byte(pass)); err != nil {
+		t.Fatal("stdout should contain only the password hash")
+	}
+	for _, arg := range []string{pass, "--" + pass} {
+		out.Reset()
+		code := Run(t.Context(), []string{"hash-password", arg}, strings.NewReader(""), &out, &logger)
+		if code == 0 || strings.Contains(out.String(), pass) {
+			t.Fatal("unexpected password argument should be rejected without echoing it")
+		}
 	}
 }

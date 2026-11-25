@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -36,8 +37,8 @@ func (tokenRecord) TableName() string {
 }
 
 type balanceRecord struct {
-	ID              int64 `gorm:"primaryKey;autoIncrement;index:idx_balance_records_latest_success,where:error = '',sort:desc,priority:2"`
-	TokenID         int64 `gorm:"not null;index:idx_balance_records_latest_success,priority:1"`
+	ID              int64 `gorm:"primaryKey;autoIncrement;index:idx_balance_records_latest_success,where:error = '',sort:desc,priority:2;index:idx_balance_records_latest,sort:desc,priority:2"`
+	TokenID         int64 `gorm:"not null;index:idx_balance_records_latest_success,priority:1;index:idx_balance_records_latest,priority:1"`
 	CheckedAt       int64 `gorm:"not null;index:idx_balance_records_checked_at"`
 	AvailableMicros *int64
 	VoucherMicros   *int64
@@ -67,6 +68,10 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		TranslateError: true,
 	})
 	if err != nil {
+		// 驱动的解析错误可能附带格式不完整、无法可靠脱敏的 DSN。
+		if _, ok := errors.AsType[*pgconn.ParseConfigError](err); ok {
+			return nil, errors.New("解析 database.dsn 失败，请检查连接串格式及 URL 转义")
+		}
 		return nil, fmt.Errorf("打开 PostgreSQL 失败: %w", err)
 	}
 	sqlDB, err := gormDB.DB()
@@ -80,7 +85,12 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	if err := sqlDB.PingContext(ctx); err != nil {
 		return closeOnError(fmt.Errorf("连接 PostgreSQL 失败: %w", err))
 	}
-	if err := gormDB.WithContext(ctx).AutoMigrate(&tokenRecord{}, &balanceRecord{}); err != nil {
+	if err := gormDB.WithContext(ctx).AutoMigrate(
+		&tokenRecord{},
+		&balanceRecord{},
+		&webhookSetting{},
+		&notificationPart{},
+	); err != nil {
 		return closeOnError(fmt.Errorf("迁移数据库结构失败: %w", err))
 	}
 	return &Store{db: gormDB}, nil
@@ -96,18 +106,15 @@ func (s *Store) Close() error {
 
 // AddToken 添加令牌；token_hash 的唯一索引保证不会重复。
 func (s *Store) AddToken(ctx context.Context, name string, digest, ciphertext []byte, now time.Time) (model.Token, error) {
-	db := s.db.WithContext(ctx)
-	var existing tokenRecord
-	err := db.Select("id").Where("token_hash = ?", digest).Take(&existing).Error
-	if err == nil {
-		return model.Token{}, ErrDuplicateToken
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return model.Token{}, fmt.Errorf("检查令牌是否重复失败: %w", err)
-	}
+	return s.AddTokenWithRemark(ctx, name, "", digest, ciphertext, now)
+}
 
+// AddTokenWithRemark 在同一次插入中保存凭据和初始备注。
+func (s *Store) AddTokenWithRemark(ctx context.Context, name, remark string, digest, ciphertext []byte, now time.Time) (model.Token, error) {
+	db := s.db.WithContext(ctx)
 	record := tokenRecord{
 		Name:            name,
+		Remark:          strings.TrimSpace(remark),
 		TokenHash:       digest,
 		TokenCiphertext: ciphertext,
 		CreatedAt:       now.UTC().UnixMilli(),
@@ -265,13 +272,12 @@ func (s *Store) RecordFailure(ctx context.Context, tokenID int64, checkedAt time
 	return nil
 }
 
-// SumConsumptionByToken 按令牌汇总闭区间 [start, end] 内相邻成功快照的余额下降量。
-// 当天首条快照会与午夜前的最近一次成功快照比较，失败和补充记录不计为消耗。
-func (s *Store) SumConsumptionByToken(ctx context.Context, start, end time.Time) (map[int64]int64, error) {
-	const query = `
-SELECT current_record.token_id, SUM(previous_record.available_micros - current_record.available_micros)::bigint AS consumption_micros
+// 区间只限制当前记录。前驱可能来自区间开始之前，包括上一自然日。
+const snapshotChanges = `
+SELECT current_record.token_id, current_record.checked_at,
+	greatest(previous_record.available_micros::numeric - current_record.available_micros, 0) AS consumed
 FROM balance_records AS current_record
-JOIN LATERAL (
+LEFT JOIN LATERAL (
 	SELECT previous_record.available_micros
 	FROM balance_records AS previous_record
 	WHERE previous_record.token_id = current_record.token_id
@@ -282,9 +288,12 @@ JOIN LATERAL (
 ) AS previous_record ON TRUE
 WHERE current_record.error = ''
 	AND current_record.checked_at >= ?
-	AND current_record.checked_at <= ?
-	AND current_record.available_micros < previous_record.available_micros
-GROUP BY current_record.token_id`
+	AND current_record.checked_at <= ?`
+
+// SumConsumptionByToken 按令牌汇总闭区间 [start, end] 内相邻成功快照的余额下降量。
+func (s *Store) SumConsumptionByToken(ctx context.Context, start, end time.Time) (map[int64]int64, error) {
+	const query = `SELECT token_id, sum(consumed)::bigint AS consumption_micros FROM (` + snapshotChanges + `
+	) changes WHERE consumed > 0 GROUP BY token_id`
 	var rows []struct {
 		TokenID           int64 `gorm:"column:token_id"`
 		ConsumptionMicros int64 `gorm:"column:consumption_micros"`
