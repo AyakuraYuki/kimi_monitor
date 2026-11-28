@@ -19,11 +19,12 @@ type Balance struct {
 
 // Token 是数据库中的令牌记录，Ciphertext 不包含明文。
 type Token struct {
-	ID         int64
-	Name       string
-	Remark     string
-	Ciphertext []byte
-	CreatedAt  time.Time
+	ID                int64
+	Name              string
+	Remark            string
+	Ciphertext        []byte
+	CreatedAt         time.Time
+	MonitoringEnabled bool
 }
 
 // Snapshot 是一次成功的余额查询结果。

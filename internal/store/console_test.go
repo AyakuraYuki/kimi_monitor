@@ -68,6 +68,9 @@ func TestConsoleIncludesMissingSamplesAndLastSuccessfulBalance(t *testing.T) {
 	if latest[1].CheckedAt != nil || latest[1].AvailableMicros != nil {
 		t.Fatalf("新令牌应待采集: %+v", latest[1])
 	}
+	if !latest[0].MonitoringEnabled || !latest[1].MonitoringEnabled {
+		t.Fatalf("概览应包含默认开启的查询状态: %+v", latest)
+	}
 }
 
 func TestNotificationPreviewAndWebhookSetting(t *testing.T) {

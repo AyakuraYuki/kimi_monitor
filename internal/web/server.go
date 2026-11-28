@@ -73,6 +73,7 @@ func newRouter(cfg config.Config, db *store.Store, cipher *secrets.Cipher) (*gin
 	api.GET("/overview", app.overview)
 	api.POST("/tokens", app.addToken)
 	api.PATCH("/tokens/:id", app.changeRemark)
+	api.PUT("/tokens/:id/monitoring", app.changeMonitoring)
 	api.DELETE("/tokens/:id", app.deleteToken)
 	api.GET("/consumption", app.consumption)
 	api.GET("/consumption.csv", app.consumption)

@@ -30,6 +30,42 @@ func (a *recordingAPI) callCount(token string) int {
 	return a.calls[token]
 }
 
+func TestCheckAllSkipsPausedTokens(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	api := &recordingAPI{calls: make(map[string]int)}
+	service, database := newIntegrationService(t, api)
+	const plaintext = "sk-abcdefghijklmnop12345678"
+
+	firstRound, err := service.CheckAll(ctx)
+	if err != nil || len(firstRound) != 1 || api.callCount(plaintext) != 1 {
+		t.Fatalf("首轮采集错误: results=%+v, calls=%d, err=%v", firstRound, api.callCount(plaintext), err)
+	}
+	before, err := database.LatestTokens(ctx)
+	if err != nil || len(before) != 1 || before[0].CheckedAt == nil {
+		t.Fatalf("读取首轮采集时间失败: %+v, %v", before, err)
+	}
+	if _, err := database.SetTokenMonitoring(ctx, "1", false); err != nil {
+		t.Fatal(err)
+	}
+	pausedRound, err := service.CheckAll(ctx)
+	if err != nil || len(pausedRound) != 0 || api.callCount(plaintext) != 1 {
+		t.Fatalf("暂停后不应调用额度 API: results=%+v, calls=%d, err=%v", pausedRound, api.callCount(plaintext), err)
+	}
+	after, err := database.LatestTokens(ctx)
+	if err != nil || len(after) != 1 || after[0].MonitoringEnabled || after[0].Error != "" ||
+		after[0].CheckedAt == nil || !after[0].CheckedAt.Equal(*before[0].CheckedAt) {
+		t.Fatalf("暂停不应生成失败记录: before=%+v, after=%+v, err=%v", before[0], after, err)
+	}
+	if _, err := database.SetTokenMonitoring(ctx, "1", true); err != nil {
+		t.Fatal(err)
+	}
+	resumedRound, err := service.CheckAll(ctx)
+	if err != nil || len(resumedRound) != 1 || api.callCount(plaintext) != 2 {
+		t.Fatalf("恢复后应重新采集: results=%+v, calls=%d, err=%v", resumedRound, api.callCount(plaintext), err)
+	}
+}
+
 func TestNewRoundReadsTokensFromIndependentManagementConnection(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

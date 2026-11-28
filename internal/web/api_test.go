@@ -74,8 +74,21 @@ func TestConsoleRoutes(t *testing.T) {
 	call("PATCH", "/api/tokens/1", `{}`, 400)
 	call("PATCH", "/api/tokens/1", `{"remark":"=signed, value"}`, 204)
 	overview := call("GET", "/api/overview", "", 200)
-	if strings.Contains(overview.Body.String(), key) || !strings.Contains(overview.Body.String(), `"status":"pending"`) {
+	if strings.Contains(overview.Body.String(), key) || !strings.Contains(overview.Body.String(), `"status":"pending"`) ||
+		!strings.Contains(overview.Body.String(), `"monitoring_enabled":true`) {
 		t.Fatal("unexpected pending token view")
+	}
+	call("PUT", "/api/tokens/1/monitoring", `{}`, 400)
+	call("PUT", "/api/tokens/999/monitoring", `{"enabled":false}`, 404)
+	call("PUT", "/api/tokens/1/monitoring", `{"enabled":false}`, 204)
+	overview = call("GET", "/api/overview", "", 200)
+	if !strings.Contains(overview.Body.String(), `"monitoring_enabled":false`) || !strings.Contains(overview.Body.String(), `"status":"paused"`) {
+		t.Fatal("暂停后的令牌概览状态错误")
+	}
+	call("PUT", "/api/tokens/1/monitoring", `{"enabled":true}`, 204)
+	overview = call("GET", "/api/overview", "", 200)
+	if !strings.Contains(overview.Body.String(), `"monitoring_enabled":true`) || !strings.Contains(overview.Body.String(), `"status":"pending"`) {
+		t.Fatal("恢复后的令牌概览状态错误")
 	}
 	now := time.Now().In(config.CST())
 	// Both samples fall on the same Beijing date, including tests started at midnight.

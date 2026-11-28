@@ -2,12 +2,12 @@ const $ = selector => document.querySelector(selector);
 const svgNS = "http://www.w3.org/2000/svg";
 const pages = {
   overview: ["监控概览", "查看最近一次余额采集、今日消耗和企业微信通知。"],
-  tokens: ["令牌管理", "管理参与余额采集的 API Key 与备注。"],
+  tokens: ["令牌管理", "管理参与余额采集的 API Key、备注与额度查询状态。"],
   consumption: ["每日消耗", "按北京时间查询每个令牌的每日消耗。"],
   settings: ["通知设置", "配置余额监控报告的企业微信接收地址。"],
 };
 const states = {
-  normal: "正常", low: "余额不足", exhausted: "已用尽", error: "采集异常", pending: "待采集",
+  normal: "正常", low: "余额不足", exhausted: "已用尽", error: "采集异常", pending: "待采集", paused: "已暂停",
 };
 const dayFormat = new Intl.DateTimeFormat("en-CA", {
   timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
@@ -282,6 +282,33 @@ function showTokenForm(token) {
   openDialog(editing ? "编辑令牌备注" : "添加监控令牌", form);
   (editing ? remark.input : key.input).focus();
 }
+function monitoringBadge(token) {
+  const state = badge(token.monitoring_enabled ? "normal" : "paused", token.monitoring_enabled ? "已开启" : "已暂停");
+  state.classList.add("monitoring-status");
+  return state;
+}
+function updateMonitoringButton(btn, token) {
+  const label = (token.monitoring_enabled ? "暂停" : "开启") + " #" + token.id + " " + token.name + " 的 API 额度查询";
+  btn.replaceChildren(icon(token.monitoring_enabled ? "pause" : "play"));
+  btn.setAttribute("aria-label", label);
+  btn.title = label;
+}
+function monitoringButton(token) {
+  const btn = iconButton("", null, async current => {
+    const enabled = !token.monitoring_enabled;
+    setBusy(current, true);
+    try {
+      await api("/api/tokens/" + token.id + "/monitoring", {method:"PUT", data:{enabled}});
+      token.monitoring_enabled = enabled;
+      current.closest("tr")?.querySelector(".monitoring-status")?.replaceWith(monitoringBadge(token));
+      updateMonitoringButton(current, token);
+      notice(enabled ? "已开启 API 额度查询，将从下一轮开始采集。" : "已暂停 API 额度查询，历史余额和消耗记录仍会保留。");
+    } catch (error) { notice(error.message); }
+    finally { setBusy(current, false); }
+  });
+  updateMonitoringButton(btn, token);
+  return btn;
+}
 function deleteToken(token) {
   const selected = el("div", "selected-token", tokenLabel(token, true));
   const help = el("p", "dialog-help", "删除将一并清除该令牌的余额和消耗历史。此操作无法撤销。");
@@ -413,8 +440,10 @@ function tokenTable(tokens, managing) {
       {key:"name", title:"令牌名称", value:row => row.name, render:row => tokenLabel(row)},
       {key:"remark", title:"令牌备注", value:row => row.remark, render:row => el("span", "remark", row.remark || "—")},
       {key:"created", title:"添加时间", value:row => Date.parse(row.created_at), render:row => timeNode(row.created_at)},
+      {key:"monitoring", title:"API 额度查询", value:row => row.monitoring_enabled, render:row => monitoringBadge(row)},
       {title:"操作", cls:"align-right", render:row => el("div", "row-actions",
         iconButton("编辑 #" + row.id + " " + row.name + " 的备注", "edit", () => showTokenForm(row)),
+        monitoringButton(row),
         iconButton("删除 #" + row.id + " " + row.name, "trash", () => deleteToken(row)))},
     ];
   } else {
@@ -424,9 +453,10 @@ function tokenTable(tokens, managing) {
       amountColumn("available", "可用余额"), amountColumn("cash", "现金"), amountColumn("voucher", "代金券"),
       amountColumn("today_consumption", "今日消耗"),
       {key:"checked_at", title:"最近采集", value:row => row.checked_at ? Date.parse(row.checked_at) : null,
-        render:row => el("div", "", row.checked_at ? timeNode(row.checked_at) : "等待首轮",
-          row.status === "error" && row.error ? el("small", "small", row.error) : null,
-          row.status === "error" && row.balance_at ? el("small", "small", "余额采集于 " + timeText(row.balance_at)) : null)},
+        render:row => el("div", "", row.checked_at ? timeNode(row.checked_at) : row.monitoring_enabled ? "等待首轮" : "尚未采集",
+          row.monitoring_enabled && row.status === "error" && row.error ? el("small", "small", row.error) : null,
+          row.monitoring_enabled && row.status === "error" && row.balance_at ? el("small", "small", "余额采集于 " + timeText(row.balance_at)) : null,
+          !row.monitoring_enabled ? el("small", "small", "已暂停查询，历史数据不再更新") : null)},
     ];
   }
   return dataTable(managing ? "监控令牌列表" : "令牌余额明细", columns, tokens, {kind:managing ? "" : "balances"});

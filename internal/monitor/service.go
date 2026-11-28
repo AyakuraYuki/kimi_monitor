@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -37,12 +38,15 @@ type Service struct {
 	Now         func() time.Time
 }
 
-// CheckAll 并发查询全部令牌，返回顺序与数据库中的令牌 ID 顺序一致。
+// CheckAll 并发查询全部已启用令牌，返回顺序与数据库中的令牌 ID 顺序一致。
 func (s *Service) CheckAll(ctx context.Context) ([]model.TokenResult, error) {
 	tokens, err := s.Store.ListTokens(ctx)
 	if err != nil {
 		return nil, err
 	}
+	tokens = slices.DeleteFunc(tokens, func(token model.Token) bool {
+		return !token.MonitoringEnabled
+	})
 	if len(tokens) == 0 {
 		return []model.TokenResult{}, nil
 	}
@@ -55,21 +59,17 @@ func (s *Service) CheckAll(ctx context.Context) ([]model.TokenResult, error) {
 	if parallel <= 0 {
 		parallel = 4
 	}
-	if parallel > len(tokens) {
-		parallel = len(tokens)
-	}
+	parallel = min(parallel, len(tokens))
 
 	results := make([]model.TokenResult, len(tokens))
 	jobs := make(chan int)
 	var workers sync.WaitGroup
-	workers.Add(parallel)
-	for i := 0; i < parallel; i++ {
-		go func() {
-			defer workers.Done()
+	for range parallel {
+		workers.Go(func() {
 			for index := range jobs {
 				results[index] = s.checkOne(ctx, tokens[index], checkedAt)
 			}
-		}()
+		})
 	}
 	for index := range tokens {
 		select {
@@ -159,7 +159,7 @@ func RunOnce(ctx context.Context, service *Service, delivery *Delivery, lowThres
 		return err
 	}
 	if len(results) == 0 {
-		logger.Info().Msg("没有已配置的令牌，本轮跳过推送")
+		logger.Info().Msg("没有已启用额度查询的令牌，本轮跳过推送")
 		return nil
 	}
 	client, err := delivery.client(ctx)

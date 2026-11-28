@@ -25,18 +25,19 @@ func amount(micros *int64) *string {
 }
 
 type tokenView struct {
-	ID               int64      `json:"id"`
-	Name             string     `json:"name"`
-	Remark           string     `json:"remark"`
-	CreatedAt        time.Time  `json:"created_at"`
-	CheckedAt        *time.Time `json:"checked_at"`
-	BalanceAt        *time.Time `json:"balance_at"`
-	Available        *string    `json:"available"`
-	Cash             *string    `json:"cash"`
-	Voucher          *string    `json:"voucher"`
-	TodayConsumption *string    `json:"today_consumption"`
-	Status           string     `json:"status"`
-	Error            string     `json:"error,omitempty"`
+	ID                int64      `json:"id"`
+	Name              string     `json:"name"`
+	Remark            string     `json:"remark"`
+	CreatedAt         time.Time  `json:"created_at"`
+	MonitoringEnabled bool       `json:"monitoring_enabled"`
+	CheckedAt         *time.Time `json:"checked_at"`
+	BalanceAt         *time.Time `json:"balance_at"`
+	Available         *string    `json:"available"`
+	Cash              *string    `json:"cash"`
+	Voucher           *string    `json:"voucher"`
+	TodayConsumption  *string    `json:"today_consumption"`
+	Status            string     `json:"status"`
+	Error             string     `json:"error,omitempty"`
 }
 
 func (app *console) overview(c *gin.Context) {
@@ -55,19 +56,22 @@ func (app *console) overview(c *gin.Context) {
 	result := make([]tokenView, 0, len(data.Tokens))
 	for _, item := range data.Tokens {
 		row := tokenView{
-			ID:        item.ID,
-			Name:      item.Name,
-			Remark:    item.Remark,
-			CreatedAt: item.CreatedAt,
-			CheckedAt: item.CheckedAt,
-			BalanceAt: item.BalanceAt,
-			Error:     item.Error,
-			Available: amount(item.AvailableMicros),
-			Cash:      amount(item.CashMicros),
-			Voucher:   amount(item.VoucherMicros),
-			Status:    "pending",
+			ID:                item.ID,
+			Name:              item.Name,
+			Remark:            item.Remark,
+			CreatedAt:         item.CreatedAt,
+			MonitoringEnabled: item.MonitoringEnabled,
+			CheckedAt:         item.CheckedAt,
+			BalanceAt:         item.BalanceAt,
+			Error:             item.Error,
+			Available:         amount(item.AvailableMicros),
+			Cash:              amount(item.CashMicros),
+			Voucher:           amount(item.VoucherMicros),
+			Status:            "pending",
 		}
-		if item.Error != "" {
+		if !item.MonitoringEnabled {
+			row.Status = "paused"
+		} else if item.Error != "" {
 			row.Status = string(model.HealthError)
 		} else if item.AvailableMicros != nil {
 			row.Status = string(model.BalanceHealth(*item.AvailableMicros, app.cfg.LowBalanceMicros()))
@@ -150,6 +154,28 @@ func (app *console) changeRemark(c *gin.Context) {
 		return
 	}
 	if _, err := app.db.SetTokenRemark(c.Request.Context(), id, *form.Remark); err != nil {
+		storeError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (app *console) changeMonitoring(c *gin.Context) {
+	id, ok := tokenID(c)
+	if !ok {
+		return
+	}
+	var form struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if !decodeJSON(c, &form) {
+		return
+	}
+	if form.Enabled == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请提供 enabled 布尔值"})
+		return
+	}
+	if _, err := app.db.SetTokenMonitoring(c.Request.Context(), id, *form.Enabled); err != nil {
 		storeError(c, err)
 		return
 	}

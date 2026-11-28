@@ -131,7 +131,8 @@ td .small, th .small { display: block; font: .74rem/1.5 var(--sans); color: var(
 .token-name { font: 500 .85rem/1.45 var(--mono); overflow-wrap: anywhere; }
 .remark { overflow-wrap: anywhere; min-width: 7ch; max-width: 36ch; }
 .align-right { text-align: right; }
-.row-actions { flex-wrap: nowrap; gap: .15rem; justify-content: flex-end; }
+.row-actions { flex-wrap: nowrap; gap: .25rem; justify-content: flex-end; }
+.row-actions .icon-button { width: 2.75rem; min-height: 2.75rem; }
 .row-actions .icon-button:hover:last-child { color: var(--danger); }
 .pager { padding: .4rem 1.25rem; border-top: 1px solid var(--quiet-line); font-size: .79rem; color: var(--muted); }
 .pager .btn { font-size: .76rem; min-height: 2.15rem; padding: .3rem .6rem; }

@@ -24,12 +24,13 @@ var (
 )
 
 type tokenRecord struct {
-	ID              int64  `gorm:"primaryKey;autoIncrement"`
-	Name            string `gorm:"not null"`
-	TokenHash       []byte `gorm:"not null;uniqueIndex"`
-	TokenCiphertext []byte `gorm:"not null"`
-	Remark          string `gorm:"not null;default:''"`
-	CreatedAt       int64  `gorm:"not null"`
+	ID                int64  `gorm:"primaryKey;autoIncrement"`
+	Name              string `gorm:"not null"`
+	TokenHash         []byte `gorm:"not null;uniqueIndex"`
+	TokenCiphertext   []byte `gorm:"not null"`
+	Remark            string `gorm:"not null;default:''"`
+	CreatedAt         int64  `gorm:"not null"`
+	MonitoringEnabled bool   `gorm:"not null;default:true"`
 }
 
 func (tokenRecord) TableName() string {
@@ -113,11 +114,12 @@ func (s *Store) AddToken(ctx context.Context, name string, digest, ciphertext []
 func (s *Store) AddTokenWithRemark(ctx context.Context, name, remark string, digest, ciphertext []byte, now time.Time) (model.Token, error) {
 	db := s.db.WithContext(ctx)
 	record := tokenRecord{
-		Name:            name,
-		Remark:          strings.TrimSpace(remark),
-		TokenHash:       digest,
-		TokenCiphertext: ciphertext,
-		CreatedAt:       now.UTC().UnixMilli(),
+		Name:              name,
+		Remark:            strings.TrimSpace(remark),
+		TokenHash:         digest,
+		TokenCiphertext:   ciphertext,
+		CreatedAt:         now.UTC().UnixMilli(),
+		MonitoringEnabled: true,
 	}
 	if err := db.Create(&record).Error; err != nil {
 		if errors.Is(err, gorm.ErrDuplicatedKey) || strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -172,6 +174,23 @@ func (s *Store) SetTokenRemark(ctx context.Context, selector, remark string) (mo
 		return model.Token{}, ErrTokenNotFound
 	}
 	record.Remark = remark
+	return tokenFromRecord(*record), nil
+}
+
+// SetTokenMonitoring 开启或暂停令牌的 API 额度查询，历史快照保持不变。
+func (s *Store) SetTokenMonitoring(ctx context.Context, selector string, enabled bool) (model.Token, error) {
+	record, err := s.findToken(ctx, selector)
+	if err != nil {
+		return model.Token{}, err
+	}
+	result := s.db.WithContext(ctx).Model(&tokenRecord{}).Where("id = ?", record.ID).Update("monitoring_enabled", enabled)
+	if result.Error != nil {
+		return model.Token{}, fmt.Errorf("保存令牌查询状态失败: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return model.Token{}, ErrTokenNotFound
+	}
+	record.MonitoringEnabled = enabled
 	return tokenFromRecord(*record), nil
 }
 
@@ -310,10 +329,11 @@ func (s *Store) SumConsumptionByToken(ctx context.Context, start, end time.Time)
 
 func tokenFromRecord(record tokenRecord) model.Token {
 	return model.Token{
-		ID:         record.ID,
-		Name:       record.Name,
-		Remark:     record.Remark,
-		Ciphertext: record.TokenCiphertext,
-		CreatedAt:  time.UnixMilli(record.CreatedAt).UTC(),
+		ID:                record.ID,
+		Name:              record.Name,
+		Remark:            record.Remark,
+		Ciphertext:        record.TokenCiphertext,
+		CreatedAt:         time.UnixMilli(record.CreatedAt).UTC(),
+		MonitoringEnabled: record.MonitoringEnabled,
 	}
 }

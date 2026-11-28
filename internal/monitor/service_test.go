@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -78,6 +79,64 @@ func (s *consumptionStoreStub) SumConsumptionByToken(_ context.Context, start, e
 	summary := s.summaries[0]
 	s.summaries = s.summaries[1:]
 	return summary, nil
+}
+
+type checkStoreStub struct {
+	Store
+	tokens   []model.Token
+	failures int
+}
+
+func (s *checkStoreStub) ListTokens(context.Context) ([]model.Token, error) {
+	return slices.Clone(s.tokens), nil
+}
+
+func (s *checkStoreStub) RecordSuccess(context.Context, int64, time.Time, model.Balance) (*model.Snapshot, error) {
+	return nil, nil
+}
+
+func (s *checkStoreStub) RecordFailure(context.Context, int64, time.Time, string) error {
+	s.failures++
+	return nil
+}
+
+func TestCheckAllHonorsMonitoringEnabled(t *testing.T) {
+	t.Parallel()
+	cipher, err := secrets.NewCipher(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabledCiphertext, err := cipher.Encrypt("enabled-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pausedCiphertext, err := cipher.Encrypt("paused-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := &checkStoreStub{tokens: []model.Token{
+		{ID: 1, Name: "enabled", Ciphertext: enabledCiphertext, MonitoringEnabled: true},
+		{ID: 2, Name: "paused", Ciphertext: pausedCiphertext, MonitoringEnabled: false},
+	}}
+	api := &recordingAPI{calls: make(map[string]int)}
+	service := &Service{Store: database, API: api, Cipher: cipher, MaxParallel: 1}
+
+	results, err := service.CheckAll(t.Context())
+	if err != nil || len(results) != 1 || results[0].TokenID != 1 || results[0].Err != nil {
+		t.Fatalf("首轮结果错误: %+v, %v", results, err)
+	}
+	if api.callCount("enabled-token") != 1 || api.callCount("paused-token") != 0 || database.failures != 0 {
+		t.Fatalf("暂停令牌不应调用 API 或记录失败: calls=%+v, failures=%d", api.calls, database.failures)
+	}
+
+	database.tokens[1].MonitoringEnabled = true
+	results, err = service.CheckAll(t.Context())
+	if err != nil || len(results) != 2 || results[0].Err != nil || results[1].Err != nil {
+		t.Fatalf("恢复后的结果错误: %+v, %v", results, err)
+	}
+	if api.callCount("enabled-token") != 2 || api.callCount("paused-token") != 1 || database.failures != 0 {
+		t.Fatalf("恢复后应重新调用 API: calls=%+v, failures=%d", api.calls, database.failures)
+	}
 }
 
 func TestBuildReportUsesBeijingConsumptionWindows(t *testing.T) {

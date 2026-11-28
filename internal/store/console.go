@@ -39,21 +39,22 @@ func (s *Store) Overview(ctx context.Context, start, now time.Time) (Overview, e
 
 // TokenOverview 不读取凭据。最近尝试的错误与最近一次成功查询的金额各有自己的时间戳。
 type TokenOverview struct {
-	ID              int64
-	Name            string
-	Remark          string
-	CreatedAt       time.Time
-	CheckedAt       *time.Time
-	Error           string
-	BalanceAt       *time.Time
-	AvailableMicros *int64
-	VoucherMicros   *int64
-	CashMicros      *int64
+	ID                int64
+	Name              string
+	Remark            string
+	CreatedAt         time.Time
+	MonitoringEnabled bool
+	CheckedAt         *time.Time
+	Error             string
+	BalanceAt         *time.Time
+	AvailableMicros   *int64
+	VoucherMicros     *int64
+	CashMicros        *int64
 }
 
 func (s *Store) LatestTokens(ctx context.Context) ([]TokenOverview, error) {
 	const query = `
-SELECT t.id, t.name, t.remark, to_timestamp(t.created_at / 1000.0) AS created_at,
+SELECT t.id, t.name, t.remark, t.monitoring_enabled, to_timestamp(t.created_at / 1000.0) AS created_at,
 	to_timestamp(attempt.checked_at / 1000.0) AS checked_at, coalesce(attempt.error, '') AS error,
 	to_timestamp(balance.checked_at / 1000.0) AS balance_at,
 	balance.available_micros, balance.voucher_micros, balance.cash_micros

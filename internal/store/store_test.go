@@ -100,6 +100,35 @@ func TestTokenRemark(t *testing.T) {
 	}
 }
 
+func TestTokenMonitoringSetting(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	database := openTestStore(t)
+	token, err := database.AddToken(ctx, "sk-abcd****5678", []byte("hash"), []byte("cipher"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !token.MonitoringEnabled {
+		t.Fatal("新令牌应默认开启额度查询")
+	}
+
+	updated, err := database.SetTokenMonitoring(ctx, strconv.FormatInt(token.ID, 10), false)
+	if err != nil || updated.MonitoringEnabled {
+		t.Fatalf("暂停令牌查询失败: %+v, %v", updated, err)
+	}
+	tokens, err := database.ListTokens(ctx)
+	if err != nil || len(tokens) != 1 || tokens[0].MonitoringEnabled {
+		t.Fatalf("暂停状态未持久化: %+v, %v", tokens, err)
+	}
+	updated, err = database.SetTokenMonitoring(ctx, token.Name, true)
+	if err != nil || !updated.MonitoringEnabled {
+		t.Fatalf("恢复令牌查询失败: %+v, %v", updated, err)
+	}
+	if _, err := database.SetTokenMonitoring(ctx, "999", false); !errors.Is(err, ErrTokenNotFound) {
+		t.Fatalf("不存在的令牌设置查询状态错误 = %v，期望 ErrTokenNotFound", err)
+	}
+}
+
 func TestOpenMigratesLegacyTokensTable(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -141,7 +170,7 @@ func TestOpenMigratesLegacyTokensTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tokens) != 1 || tokens[0].Name != "sk-abcd****5678" || tokens[0].Remark != "" {
+	if len(tokens) != 1 || tokens[0].Name != "sk-abcd****5678" || tokens[0].Remark != "" || !tokens[0].MonitoringEnabled {
 		t.Fatalf("旧令牌迁移后数据错误: %+v", tokens)
 	}
 	if _, err := database.SetTokenRemark(ctx, "1", "迁移后备注"); err != nil {
