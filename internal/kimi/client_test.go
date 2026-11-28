@@ -42,6 +42,31 @@ func TestFetchBalance(t *testing.T) {
 	}
 }
 
+func TestFetchBalanceAcceptsHighPrecisionDebt(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(writer, `{
+			"code": 0,
+			"data": {"available_balance": 0, "voucher_balance": 0, "cash_balance": -6.4044504},
+			"scode": "0x0",
+			"status": true
+		}`)
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	balance, err := client.FetchBalance(t.Context(), "test-token")
+	if err != nil {
+		t.Fatalf("超精度欠费应当可以解析: %v", err)
+	}
+	if balance.AvailableMicros != 0 || balance.VoucherMicros != 0 || balance.CashMicros != -6_404_450 {
+		t.Fatalf("欠费余额转换错误: %+v", balance)
+	}
+}
+
 func TestFetchBalanceErrors(t *testing.T) {
 	t.Parallel()
 	const echoToken = "sk-echotoken12345678"

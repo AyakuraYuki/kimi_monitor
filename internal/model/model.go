@@ -119,7 +119,8 @@ func (r TokenResult) DeltaMicros() (int64, bool) {
 	return r.Current.Balance.AvailableMicros - r.Previous.Balance.AvailableMicros, true
 }
 
-// ParseMicros 将十进制人民币金额精确转换为微元。
+// ParseMicros 将十进制人民币金额转换为微元。
+// 正数必须精确到微元；接口返回的负数欠费允许更高精度，并四舍五入到微元。
 func ParseMicros(value string) (int64, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -131,7 +132,16 @@ func ParseMicros(value string) (int64, error) {
 	}
 	scaled := new(big.Rat).Mul(r, big.NewRat(MicrosPerYuan, 1))
 	if !scaled.IsInt() {
-		return 0, fmt.Errorf("金额 %q 的小数精度超过 6 位", value)
+		if scaled.Sign() >= 0 {
+			return 0, fmt.Errorf("金额 %q 的小数精度超过 6 位", value)
+		}
+		micros, remainder := new(big.Int), new(big.Int)
+		micros.QuoRem(scaled.Num(), scaled.Denom(), remainder)
+		twiceRemainder := new(big.Int).Lsh(new(big.Int).Abs(remainder), 1)
+		if twiceRemainder.Cmp(scaled.Denom()) >= 0 {
+			micros.Sub(micros, big.NewInt(1))
+		}
+		scaled.SetInt(micros)
 	}
 	if !scaled.Num().IsInt64() {
 		return 0, fmt.Errorf("金额 %q 超出支持范围", value)

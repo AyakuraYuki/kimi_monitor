@@ -18,6 +18,8 @@ func TestParseMicrosAndFormatCNY(t *testing.T) {
 		{input: "0.000001", micros: 1, text: "¥0.000001"},
 		{input: "1e-6", micros: 1, text: "¥0.000001"},
 		{input: "-3.00001", micros: -3_000_010, text: "-¥3.000010"},
+		{input: "-6.4044504", micros: -6_404_450, text: "-¥6.404450"},
+		{input: "-0.0000005", micros: -1, text: "-¥0.000001"},
 	}
 	for _, test := range tests {
 		micros, err := ParseMicros(test.input)

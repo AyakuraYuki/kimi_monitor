@@ -55,7 +55,7 @@ type balanceResponse struct {
 	} `json:"data"`
 }
 
-// FetchBalance 查询余额，并将 API 浮点数字精确转换为整数微元。
+// FetchBalance 查询余额，并将 API 数字转换为整数微元；超精度欠费按四舍五入处理。
 func (c *Client) FetchBalance(ctx context.Context, token string) (model.Balance, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint, nil)
 	if err != nil {
